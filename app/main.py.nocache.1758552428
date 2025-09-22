@@ -1,0 +1,170 @@
+import os
+import sqlite3
+import redis as _redis
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+# ----------------------
+# FastAPI 초기화
+# ----------------------
+app = FastAPI(title="Co-GM Assistant API")
+
+# ----------------------
+# Redis 초기화
+# ----------------------
+redis_client = None
+_redis_enabled = False
+_last_error = None
+
+_red_url = os.environ.get("REDIS_URL")
+if _red_url:
+    try:
+        redis_client = _redis.from_url(_red_url, decode_responses=True)
+        redis_client.ping()
+        _redis_enabled = True
+    except Exception as e:
+        _last_error = str(e)
+        redis_client = None
+        _redis_enabled = False
+
+# ----------------------
+# DB 연결 (SQLite, Lahman)
+# ----------------------
+DB_PATH = "data/lahman.sqlite"
+
+def get_conn():
+    return sqlite3.connect(DB_PATH)
+
+# ----------------------
+# 모델 정의 (예시)
+# ----------------------
+class TeamResult(BaseModel):
+    teamID: str
+    wins: int
+    losses: int
+
+# ----------------------
+# 기본 엔드포인트
+# ----------------------
+@app.get("/_ping")
+def ping():
+    return {"ok": True}
+
+@app.get("/_metrics")
+def metrics():
+    return {
+        "cache": _CACHE_METRICS,
+        "db_path": DB_PATH,
+        "redis_enabled": _redis_enabled,
+        "last_error": _last_error,
+    }
+
+# ----------------------
+# 엔드포인트 골격
+# ----------------------
+# === CACHE HELPERS (auto) ===
+try:
+    app  # defined later
+except NameError:
+    pass
+
+_CACHE_METRICS = {"hits": 0, "miss": 0, "set": 0}
+
+
+
+# ---- SAFETY GUARD: cached fallback (no-op if not defined) ----
+try:
+    cached
+except NameError:
+
+@cached(lambda season, limit=30, **kw: f"tl:{season}:{limit}", ttl=600)
+@app.get("/team_leaderboard")
+@app.get("/team_leaderboard")
+def team_leaderboard(season: int, limit: int = 10):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT teamID, W, L
+        FROM Teams
+        WHERE yearID = ?
+        ORDER BY W DESC
+        LIMIT ?
+    """, (season, limit))
+    rows = cur.fetchall()
+    conn.close()
+    return [TeamResult(teamID=r[0], wins=r[1], losses=r[2]) for r in rows]
+
+@app.get("/get_player_trend")
+def get_player_trend(name: str, season: int, years: int = 3):
+    # 최소 골격 (DB lookup은 나중에 구현)
+    return {
+        "player": name,
+        "season": season,
+        "years": years,
+        "trend": []
+    }
+import json
+
+def _redis_client():
+    try:
+        return app.state.redis
+    except Exception:
+        return None
+
+def cache_get(key):
+    r = _redis_client()
+    if not r:
+        _CACHE_METRICS["miss"] += 1
+        return None
+    try:
+        v = r.get(key)
+        if v is None:
+            _CACHE_METRICS["miss"] += 1
+            return None
+        _CACHE_METRICS["hits"] += 1
+        import json as _j
+        return _j.loads(v)
+    except Exception:
+        _CACHE_METRICS["miss"] += 1
+        return None
+
+def cache_set(key, value, ttl=600):
+    r = _redis_client()
+    if not r:
+        return 0
+    try:
+        import json as _j
+        r.setex(key, ttl, _j.dumps(value))
+        _CACHE_METRICS["set"] += 1
+        return 1
+    except Exception:
+        return 0
+
+def cached(key_func, ttl=600):
+    def deco(fn):
+        def wrapper(*args, **kwargs):
+            try:
+                key = key_func(*args, **kwargs)
+            except Exception:
+                return fn(*args, **kwargs)
+            hit = cache_get(key)
+            if hit is not None:
+                return hit
+            out = fn(*args, **kwargs)
+            try:
+                cache_set(key, out, ttl=ttl)
+            except Exception:
+                pass
+            return out
+        wrapper.__name__ = fn.__name__
+        wrapper.__doc__  = getattr(fn, "__doc__", None)
+        wrapper.__qualname__ = getattr(fn, "__qualname__", fn.__name__)
+        return wrapper
+    return deco
+    def cached(key_func, ttl=600):
+        def _decorator(fn):
+            # no-op decorator (bypass cache) to prevent NameError
+            return fn
+        return _decorator
+# ---- END GUARD ----
+

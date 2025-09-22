@@ -1,0 +1,668 @@
+# app/main.py
+# === Co-GM Assistant: Mega Patch v0.3 (2025-09-20) ===
+import os, sqlite3, time, threading, json
+from math import pow
+from typing import List, Dict, Any, Optional, Tuple
+from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
+
+app = FastAPI(title="Co-GM Assistant")
+# === Pydantic models (declare before use) ===
+from pydantic import BaseModel
+from typing import Dict, Any, List
+
+class PlayerCompareResponse(BaseModel):
+    season: int
+    resolved: Dict[str, Any]
+    hitters: List[Dict[str, Any]]
+    pitchers: List[Dict[str, Any]]
+
+# ----------------------------------------------------
+# Core Config
+# ----------------------------------------------------
+DB_PATH = os.getenv("DB_PATH", "data/lahman.sqlite")
+REDIS_URL = os.getenv("REDIS_URL", "")
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _rval(row: sqlite3.Row, col: str, default=None):
+    try:
+        return row[col]
+    except Exception:
+        return default
+
+def safe_div(n, d):
+    try:
+        return n / d if d else 0.0
+    except ZeroDivisionError:
+        return 0.0
+
+# ----------------------------------------------------
+# Cache (Redis 우선, 없으면 메모리)
+# ----------------------------------------------------
+try:
+    if REDIS_URL:
+        import redis  # type: ignore
+        _rc = redis.from_url(REDIS_URL, decode_responses=True)
+    else:
+        _rc = None
+except Exception:
+    _rc = None
+
+_mem_cache: Dict[str, Any] = {}
+_mem_lock = threading.Lock()
+_cache_stats = {"hits": 0, "miss": 0, "set": 0}
+
+def cache_get(k: str) -> Optional[str]:
+    if _rc:
+        v = _rc.get(k); _cache_stats["hits" if v else "miss"] += 1; return v
+    with _mem_lock:
+        v = _mem_cache.get(k)
+        if not v: _cache_stats["miss"] += 1; return None
+        exp, data = v
+        if exp and exp < time.time(): _mem_cache.pop(k, None); _cache_stats["miss"] += 1; return None
+        _cache_stats["hits"] += 1; return data
+
+def cache_set(k: str, v: str, ttl: int = 300):
+    if _rc: _rc.setex(k, ttl, v); _cache_stats["set"] += 1; return
+    with _mem_lock:
+        exp = time.time() + ttl if ttl else None
+        _mem_cache[k] = (exp, v); _cache_stats["set"] += 1
+
+# ----------------------------------------------------
+# League baselines (OPS/ERA)
+# ----------------------------------------------------
+def compute_obp(h, bb, hbp, ab, sf): return safe_div(h + bb + hbp, ab + bb + hbp + sf)
+def compute_slg(h, d2, d3, hr, ab):
+    singles = max(h - d2 - d3 - hr, 0)
+    tb = singles + 2*d2 + 3*d3 + 4*hr
+    return safe_div(tb, ab)
+
+def league_ops_raw(conn, year: int) -> Dict[str, float]:
+    r = conn.execute("""
+        SELECT SUM(H) H, SUM(BB) BB, SUM(HBP) HBP, SUM(AB) AB, SUM(SF) SF,
+               SUM("2B") D2, SUM("3B") D3, SUM(HR) HR
+        FROM Batting WHERE yearID = ?
+    """, (year,)).fetchone()
+    H=_rval(r,"H",0); BB=_rval(r,"BB",0); HBP=_rval(r,"HBP",0)
+    AB=_rval(r,"AB",0); SF=_rval(r,"SF",0); D2=_rval(r,"D2",0); D3=_rval(r,"D3",0); HR=_rval(r,"HR",0)
+    obp = compute_obp(H, BB, HBP, AB, SF)
+    slg = compute_slg(H, D2, D3, HR, AB)
+    return {"lg_obp": obp, "lg_slg": slg, "lg_ops": obp + slg,
+            "H":H,"BB":BB,"HBP":HBP,"AB":AB,"SF":SF,"D2":D2,"D3":D3,"HR":HR}
+
+def league_ops(conn, year: int) -> float:
+    ck = f"lg_ops:{year}"; c = cache_get(ck)
+    if c: return float(c)
+    r = league_ops_raw(conn, year); cache_set(ck, str(r["lg_ops"]), ttl=600); return r["lg_ops"]
+
+def league_era_raw(conn, year: int) -> Dict[str, float]:
+    r = conn.execute("SELECT SUM(ER) ER, SUM(IPouts) IPouts FROM Pitching WHERE yearID = ?", (year,)).fetchone()
+    ER=_rval(r,"ER",0); IPouts=_rval(r,"IPouts",0); ip = safe_div(IPouts, 3.0)
+    era = 9.0 * safe_div(ER, ip) if ip > 0 else 0.0
+    return {"lg_era": era, "ER":ER, "IPouts":IPouts, "IP": ip}
+
+def league_era(conn, year: int) -> float:
+    ck = f"lg_era:{year}"; c = cache_get(ck)
+    if c: return float(c)
+    r = league_era_raw(conn, year); cache_set(ck, str(r["lg_era"]), ttl=600); return r["lg_era"]
+
+# ----------------------------------------------------
+# People/Name & Team code map
+# ----------------------------------------------------
+TEAM_CODE_MAP = { # Lahman -> Modern
+    "LAN":"LAD","SFN":"SFG","TBA":"TBR","NYA":"NYY","NYN":"NYM","CHN":"CHC","CHA":"CWS",
+    "SDN":"SDP","SLN":"STL","KCA":"KC","ANA":"LAA","ML4":"MIL","FLA":"MIA",
+    "ATL":"ATL","BAL":"BAL","BOS":"BOS","CLE":"CLE","COL":"COL","DET":"DET","MIN":"MIN",
+    "OAK":"OAK","PHI":"PHI","PIT":"PIT","SEA":"SEA","TEX":"TEX","TOR":"TOR","WAS":"WSH","MIA":"MIA","HOU":"HOU","ARI":"ARI"
+}
+REV_TEAM_CODE_MAP = {v:k for k,v in TEAM_CODE_MAP.items()}
+
+def find_player_ids_by_name(conn, name: str) -> List[Dict[str, str]]:
+    name = (name or "").strip()
+    parts = [p for p in name.split() if p]
+    if len(parts) >= 2:
+        fn, ln = parts[0], parts[-1]
+        rows = conn.execute("""
+            SELECT playerID, COALESCE(nameFirst,'') AS nameFirst, COALESCE(nameLast,'') AS nameLast
+            FROM People
+            WHERE (nameFirst || ' ' || nameLast) LIKE ? COLLATE NOCASE
+            ORDER BY nameLast, nameFirst
+        """, (f"%{fn}% {ln}%",)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT playerID, COALESCE(nameFirst,'') AS nameFirst, COALESCE(nameLast,'') AS nameLast
+            FROM People
+            WHERE nameFirst LIKE ? COLLATE NOCASE
+               OR nameLast  LIKE ? COLLATE NOCASE
+            ORDER BY nameLast, nameFirst
+        """, (f"%{name}%", f"%{name}%")).fetchall()
+    return [{"playerID": _rval(r,"playerID",""),
+             "name": f"{_rval(r,'nameFirst','')} {_rval(r,'nameLast','')}".strip()} for r in rows]
+
+# ----------------------------------------------------
+# Player metrics (OPS+/ERA+)
+# ----------------------------------------------------
+def player_ops_plus(conn, playerID: str, year: int) -> float:
+    r = conn.execute("""
+        SELECT SUM(H) H, SUM(BB) BB, SUM(HBP) HBP, SUM(AB) AB, SUM(SF) SF,
+               SUM("2B") D2, SUM("3B") D3, SUM(HR) HR
+        FROM Batting WHERE playerID = ? AND yearID = ?
+    """, (playerID, year)).fetchone()
+    if not r or _rval(r,"AB",0) == 0: return 0.0
+    obp = compute_obp(_rval(r,"H",0), _rval(r,"BB",0), _rval(r,"HBP",0), _rval(r,"AB",0), _rval(r,"SF",0))
+    slg = compute_slg(_rval(r,"H",0), _rval(r,"D2",0), _rval(r,"D3",0), _rval(r,"HR",0), _rval(r,"AB",0))
+    ops = obp + slg; lg = league_ops(conn, year)
+    return 100.0 * safe_div(ops, lg) if lg>0 else 0.0
+
+def pitcher_era_plus(conn, playerID: str, year: int) -> float:
+    r = conn.execute("SELECT SUM(ER) ER, SUM(IPouts) IPouts FROM Pitching WHERE playerID=? AND yearID=?",
+                     (playerID, year)).fetchone()
+    ip = safe_div(_rval(r,"IPouts",0), 3.0)
+    era = 9.0 * safe_div(_rval(r,"ER",0), ip) if ip>0 else 0.0
+    lg = league_era(conn, year)
+    return 100.0 * safe_div(lg, era) if era>0 else 0.0
+
+# ----------------------------------------------------
+# Ops/Diagnostics
+# ----------------------------------------------------
+@app.get("/_ping")
+def ping(): return {"ok": True}
+
+@app.get("/_metrics")
+def metrics(): return {"cache": _cache_stats, "db_path": DB_PATH, "redis_enabled": bool(_rc)}
+
+@app.get("/debug_league")
+def debug_league(season: int = Query(..., ge=1871, le=2100)):
+    conn = get_db(); ops_raw = league_ops_raw(conn, season); era_raw = league_era_raw(conn, season)
+    return {
+        "season": season,
+        "batting": {"lg_obp": round(ops_raw["lg_obp"],6), "lg_slg": round(ops_raw["lg_slg"],6),
+                    "lg_ops": round(ops_raw["lg_ops"],6),
+                    "counts": {k:int(ops_raw[k]) for k in ("H","BB","HBP","AB","SF","D2","D3","HR")}},
+        "pitching": {"lg_era": round(era_raw["lg_era"],6),
+                     "totals": {"ER": int(era_raw["ER"]), "IPouts": int(era_raw["IPouts"]), "IP": round(era_raw["IP"],3)}}
+    }
+
+# ----------------------------------------------------
+# Player Suite
+# ----------------------------------------------------
+@app.get("/player_search")
+def player_search(q: str = Query(..., min_length=1)):
+    conn = get_db(); term = q.strip()
+    rows = conn.execute("""
+        SELECT playerID, COALESCE(nameFirst,'') AS nameFirst, COALESCE(nameLast,'') AS nameLast
+        FROM People
+        WHERE (nameFirst || ' ' || nameLast) LIKE ? COLLATE NOCASE
+           OR nameFirst LIKE ? COLLATE NOCASE
+           OR nameLast  LIKE ? COLLATE NOCASE
+        ORDER BY nameLast, nameFirst
+        LIMIT 25
+    """, (f"%{term}%", f"%{term}%", f"%{term}%")).fetchall()
+    out = [{"playerID": r["playerID"], "name": f"{r['nameFirst']} {r['nameLast']}".strip()} for r in rows]
+    return {"query": q, "results": out}
+
+@app.get("/get_player_stats")
+def get_player_stats(
+    name: Optional[str] = Query(None),
+    playerID: Optional[str] = Query(None),
+    season: int = Query(..., ge=1871, le=2100)
+):
+    try:
+        conn = get_db()
+        # 이름 → playerID 해석
+        if not playerID:
+            if not name:
+                raise HTTPException(status_code=400, detail="name 또는 playerID 필요")
+            matches = find_player_ids_by_name(conn, name)
+            if not matches:
+                raise HTTPException(status_code=404, detail="플레이어 이름 해석 실패")
+            playerID = matches[0]["playerID"]
+            disp = matches[0]["name"]
+        else:
+            p = conn.execute(
+                "SELECT COALESCE(nameFirst,'') nf, COALESCE(nameLast,'') nl FROM People WHERE playerID=?",
+                (playerID,)
+            ).fetchone()
+            disp = f"{_rval(p,'nf','')} {_rval(p,'nl','')}".strip() if p else playerID
+
+        # 스키마 차이 안전: SB/CS는 조회하지 않음 (필요 시 별도 엔드포인트로)
+        r = conn.execute("""
+            SELECT
+              SUM(H)   AS H,
+              SUM(BB)  AS BB,
+              SUM(HBP) AS HBP,
+              SUM(AB)  AS AB,
+              SUM(SF)  AS SF,
+              SUM("2B") AS D2,
+              SUM("3B") AS D3,
+              SUM(HR)  AS HR
+            FROM Batting
+            WHERE playerID=? AND yearID=?
+        """, (playerID, season)).fetchone()
+
+        if not r or _rval(r, "AB", 0) == 0:
+            return {"player": disp, "playerID": playerID, "season": season, "note": "no batting sample"}
+
+        obp = compute_obp(_rval(r,"H",0), _rval(r,"BB",0), _rval(r,"HBP",0), _rval(r,"AB",0), _rval(r,"SF",0))
+        slg = compute_slg(_rval(r,"H",0), _rval(r,"D2",0), _rval(r,"D3",0), _rval(r,"HR",0), _rval(r,"AB",0))
+        ops = obp + slg
+        opsp = player_ops_plus(conn, playerID, season)
+
+        return {
+            "player": disp,
+            "playerID": playerID,
+            "season": season,
+            "OBP": round(obp, 3),
+            "SLG": round(slg, 3),
+            "OPS": round(ops, 3),
+            "OPS_plus": round(opsp, 1),
+            "HR": int(_rval(r, "HR", 0))
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 개발 단계: 텍스트 500 대신 JSON 에러
+        return JSONResponse(status_code=500, content={"error": "get_player_stats_failed", "detail": str(e)})
+
+@app.get("/get_pitching_stats")
+def get_pitching_stats(name: Optional[str] = Query(None), playerID: Optional[str] = Query(None),
+                       season: int = Query(..., ge=1871, le=2100)):
+    conn = get_db()
+    if not playerID:
+        if not name: raise HTTPException(400, "name 또는 playerID 필요")
+        matches = find_player_ids_by_name(conn, name)
+        if not matches: raise HTTPException(404, "플레이어 이름 해석 실패")
+        playerID = matches[0]["playerID"]; disp = matches[0]["name"]
+    else:
+        p = conn.execute("SELECT COALESCE(nameFirst,'') nf, COALESCE(nameLast,'') nl FROM People WHERE playerID=?",(playerID,)).fetchone()
+        disp = f"{_rval(p,'nf','')} {_rval(p,'nl','')}".strip() if p else playerID
+
+    r = conn.execute("""
+        SELECT SUM(ER) ER, SUM(SO) SO, SUM(BB) BB, SUM(H) H, SUM(IPouts) IPouts
+        FROM Pitching WHERE playerID=? AND yearID=?
+    """,(playerID, season)).fetchone()
+    ip = safe_div(_rval(r,"IPouts",0), 3.0)
+    era = 9.0 * safe_div(_rval(r,"ER",0), ip) if ip>0 else 0.0
+    k9 = 9.0 * safe_div(_rval(r,"SO",0), ip) if ip>0 else 0.0
+    bb9 = 9.0 * safe_div(_rval(r,"BB",0), ip) if ip>0 else 0.0
+    whip = safe_div(_rval(r,"BB",0)+_rval(r,"H",0), ip) if ip>0 else 0.0
+    erap = pitcher_era_plus(conn, playerID, season)
+    return {"player": disp,"playerID": playerID,"season": season,
+            "IP": round(ip,1),"ERA": round(era,2),"ERA_plus": round(erap,1),
+            "K9": round(k9,2),"BB9": round(bb9,2),"WHIP": round(whip,2)}
+
+@app.get("/get_player_trend")
+def get_player_trend(
+    name: Optional[str] = Query(None),
+    playerID: Optional[str] = Query(None),
+    season: int = Query(..., ge=1871, le=2100),
+    years: int = Query(3, ge=2, le=10),
+    include_pitching: bool = Query(True, description="타자만 보고 싶으면 false")
+):
+    """
+    최근 N년(기본 3) 연도별 OPS+/ERA+ 추이.
+    - 연도별로 직접 Batting/Pitching를 집계하여 계산(헬퍼 예외 삼키지 않음)
+    - 어느 연도든 데이터 없으면 0으로, 예외는 detail에 명시
+    """
+    conn = get_db()
+
+    # 이름 → playerID
+    disp = playerID or ""
+    if not playerID:
+        if not name:
+            raise HTTPException(status_code=400, detail="name 또는 playerID 필요")
+        matches = find_player_ids_by_name(conn, name)
+        if not matches:
+            raise HTTPException(status_code=404, detail="플레이어 이름 해석 실패")
+        playerID = matches[0]["playerID"]
+        disp = matches[0]["name"]
+    else:
+        p = conn.execute(
+            "SELECT COALESCE(nameFirst,'') nf, COALESCE(nameLast,'') nl FROM People WHERE playerID=?",
+            (playerID,)
+        ).fetchone()
+        disp = f"{_rval(p,'nf','')} {_rval(p,'nl','')}".strip() if p else playerID
+
+    start = max(1871, season - years + 1)
+    end = season
+    trend = []
+    errors = []
+
+    for yr in range(start, end + 1):
+        # --- Batting (OPS+) ---
+        br = conn.execute("""
+            SELECT SUM(H) H, SUM(BB) BB, SUM(HBP) HBP, SUM(AB) AB, SUM(SF) SF,
+                   SUM("2B") D2, SUM("3B") D3, SUM(HR) HR
+            FROM Batting WHERE playerID=? AND yearID=?
+        """, (playerID, yr)).fetchone()
+        if br and _rval(br, "AB", 0) > 0:
+            obp = compute_obp(_rval(br,"H",0), _rval(br,"BB",0), _rval(br,"HBP",0),
+                              _rval(br,"AB",0), _rval(br,"SF",0))
+            slg = compute_slg(_rval(br,"H",0), _rval(br,"D2",0), _rval(br,"D3",0),
+                              _rval(br,"HR",0), _rval(br,"AB",0))
+            ops = obp + slg
+            lg_ops = league_ops(conn, yr)
+            opsp = 100.0 * safe_div(ops, lg_ops) if lg_ops > 0 else 0.0
+        else:
+            opsp = 0.0
+
+        # --- Pitching (ERA+) ---
+        erap = 0.0
+        if include_pitching:
+            pr = conn.execute("""
+                SELECT SUM(ER) ER, SUM(IPouts) IPouts
+                FROM Pitching WHERE playerID=? AND yearID=?
+            """, (playerID, yr)).fetchone()
+            ip = safe_div(_rval(pr, "IPouts", 0), 3.0)
+            if ip > 0:
+                era = 9.0 * safe_div(_rval(pr, "ER", 0), ip)
+                lg_era_v = league_era(conn, yr)
+                erap = 100.0 * safe_div(lg_era_v, era) if era > 0 else 0.0
+
+        trend.append({"season": yr, "OPS_plus": round(opsp, 1), "ERA_plus": round(erap, 1)})
+
+    out = {"player": disp, "playerID": playerID, "trend": trend}
+    # 필요 시 디버깅 정보를 추가하려면 아래 주석을 해제
+    # out["debug"] = errors
+    return out
+
+@app.get("/compare_players", response_model=PlayerCompareResponse)
+def compare_players(
+    name1: str = Query(..., description="예: Bryce Harper"),
+    name2: str = Query(..., description="예: Mookie Betts"),
+    season: int = Query(..., ge=1871, le=2100)
+):
+    conn = get_db()
+
+    # 이름 → playerID 해석
+    c1 = find_player_ids_by_name(conn, name1)
+    c2 = find_player_ids_by_name(conn, name2)
+    if not c1 or not c2:
+        raise HTTPException(status_code=404, detail="플레이어 이름 해석 실패")
+
+    pid1, disp1 = c1[0]["playerID"], c1[0]["name"]
+    pid2, disp2 = c2[0]["playerID"], c2[0]["name"]
+
+    # 지표 계산
+    ops1 = player_ops_plus(conn, pid1, season)
+    ops2 = player_ops_plus(conn, pid2, season)
+    era1 = pitcher_era_plus(conn, pid1, season)
+    era2 = pitcher_era_plus(conn, pid2, season)
+
+    hitters = []
+    if ops1 > 0:
+        hitters.append({"player": disp1, "playerID": pid1, "season": season, "OPS_plus": round(ops1, 1)})
+    if ops2 > 0:
+        hitters.append({"player": disp2, "playerID": pid2, "season": season, "OPS_plus": round(ops2, 1)})
+    hitters.sort(key=lambda x: x["OPS_plus"], reverse=True)
+
+    pitchers = []
+    if era1 > 0:
+        pitchers.append({"player": disp1, "playerID": pid1, "season": season, "ERA_plus": round(era1, 1)})
+    if era2 > 0:
+        pitchers.append({"player": disp2, "playerID": pid2, "season": season, "ERA_plus": round(era2, 1)})
+    pitchers.sort(key=lambda x: x["ERA_plus"], reverse=True)
+
+    return {
+        "season": season,
+        "resolved": {"name1": disp1, "playerID1": pid1, "name2": disp2, "playerID2": pid2},
+        "hitters": hitters,
+        "pitchers": pitchers
+    }
+
+@app.get("/player_power_rankings")
+def player_power_rankings(
+    season: int = Query(..., ge=1871, le=2100),
+    limit: int = Query(25, ge=1, le=200),
+    include_baselines: bool = Query(False),
+    minAB: int = Query(200, ge=0),
+    minIP: int = Query(80, ge=0)
+):
+    ck = f"ppr:{season}:{limit}:{int(include_baselines)}:{minAB}:{minIP}"
+    c = cache_get(ck); 
+    if c: return json.loads(c)
+    conn = get_db()
+    bat_ids = [r["playerID"] for r in conn.execute(
+        "SELECT playerID FROM Batting WHERE yearID=? GROUP BY playerID HAVING SUM(AB)>=?", (season, minAB)
+    ).fetchall()]
+    bats=[]
+    for pid in bat_ids:
+        v = player_ops_plus(conn, pid, season)
+        if v<=0: continue
+        p = conn.execute("SELECT COALESCE(nameFirst,'') nf, COALESCE(nameLast,'') nl FROM People WHERE playerID=?",(pid,)).fetchone()
+        name = f"{_rval(p,'nf','')} {_rval(p,'nl','')}".strip() if p else pid
+        bats.append({"playerID": pid, "name": name, "season": season, "OPS_plus": round(v,1)})
+    bats.sort(key=lambda x:x["OPS_plus"], reverse=True); bats=bats[:limit]
+
+    pit_ids = [r["playerID"] for r in conn.execute(
+        "SELECT playerID FROM Pitching WHERE yearID=? GROUP BY playerID HAVING SUM(IPouts)>=?*3", (season, minIP)
+    ).fetchall()]
+    pits=[]
+    for pid in pit_ids:
+        v = pitcher_era_plus(conn, pid, season)
+        if v<=0: continue
+        p = conn.execute("SELECT COALESCE(nameFirst,'') nf, COALESCE(nameLast,'') nl FROM People WHERE playerID=?",(pid,)).fetchone()
+        name = f"{_rval(p,'nf','')} {_rval(p,'nl','')}".strip() if p else pid
+        pits.append({"playerID": pid, "name": name, "season": season, "ERA_plus": round(v,1)})
+    pits.sort(key=lambda x:x["ERA_plus"], reverse=True); pits=pits[:limit]
+
+    out = {"season": season, "batting_top": bats, "pitching_top": pits}
+    if include_baselines:
+        out["baselines"] = {"league_ops": round(league_ops(conn, season),6), "league_era": round(league_era(conn, season),6)}
+    cache_set(ck, json.dumps(out), 300); return out
+
+# ----------------------------------------------------
+# Team Suite
+# ----------------------------------------------------
+@app.get("/team_code_map")
+def team_code_map(): return {"lahman_to_modern": TEAM_CODE_MAP, "modern_to_lahman": REV_TEAM_CODE_MAP}
+
+def _team_ops_plus(conn, season:int, teamID:str)->float:
+    r = conn.execute("""
+        SELECT SUM(H) H, SUM(BB) BB, SUM(HBP) HBP, SUM(AB) AB, SUM(SF) SF,
+               SUM("2B") D2, SUM("3B") D3, SUM(HR) HR
+        FROM Batting WHERE yearID=? AND teamID=?
+    """,(season, teamID)).fetchone()
+    obp = compute_obp(_rval(r,"H",0), _rval(r,"BB",0), _rval(r,"HBP",0), _rval(r,"AB",0), _rval(r,"SF",0))
+    slg = compute_slg(_rval(r,"H",0), _rval(r,"D2",0), _rval(r,"D3",0), _rval(r,"HR",0), _rval(r,"AB",0))
+    ops = obp + slg; lg = league_ops(conn, season)
+    return 100.0 * safe_div(ops, lg) if lg>0 else 0.0
+
+def _team_era_plus(conn, season:int, teamID:str)->float:
+    r = conn.execute("""SELECT SUM(ER) ER, SUM(IPouts) IPouts FROM Pitching WHERE yearID=? AND teamID=?""",(season, teamID)).fetchone()
+    ip = safe_div(_rval(r,"IPouts",0),3.0); era = 9.0 * safe_div(_rval(r,"ER",0), ip) if ip>0 else 0.0
+    lg = league_era(conn, season); return 100.0 * safe_div(lg, era) if era>0 else 0.0
+
+@app.get("/get_team_stats")
+def get_team_stats(season:int=Query(...,ge=1871,le=2100), team:str=Query(...,description="LAD or LAN")):
+    conn = get_db()
+    lah = REV_TEAM_CODE_MAP.get(team.upper(), team.upper())
+    opsp = _team_ops_plus(conn, season, lah); erap = _team_era_plus(conn, season, lah)
+    return {"season": season, "team": TEAM_CODE_MAP.get(lah, lah), "team_lahman": lah,
+            "OPS_plus": round(opsp,1), "ERA_plus": round(erap,1)}
+
+@app.get("/get_team_trend")
+def get_team_trend(team:str=Query(...), season:int=Query(...,ge=1871,le=2100), years:int=Query(3,ge=2,le=5)):
+    conn = get_db(); lah = REV_TEAM_CODE_MAP.get(team.upper(), team.upper())
+    out=[]
+    for yr in range(season-years+1, season+1):
+        out.append({"season": yr, "OPS_plus": round(_team_ops_plus(conn, yr, lah),1),
+                    "ERA_plus": round(_team_era_plus(conn, yr, lah),1)})
+    return {"team": TEAM_CODE_MAP.get(lah, lah), "team_lahman": lah, "trend": out}
+
+@app.get("/team_leaderboard")
+def team_leaderboard(season:int=Query(...,ge=1871,le=2100), limit:int=Query(10,ge=1,le=50),
+                     include_baselines:bool=Query(True), modern_codes:bool=Query(True)):
+    conn = get_db(); lg_ops=league_ops(conn,season); lg_era=league_era(conn,season)
+    bats=[]; pits=[]
+    for r in conn.execute("SELECT DISTINCT teamID FROM Teams WHERE yearID=?", (season,)).fetchall():
+        t = _rval(r,"teamID",""); modern = TEAM_CODE_MAP.get(t,t) if modern_codes else t
+        bats.append({"team": modern, "season": season, "OPS_plus": round(_team_ops_plus(conn, season, t),1)})
+        pits.append({"team": modern, "season": season, "ERA_plus": round(_team_era_plus(conn, season, t),1)})
+    bats.sort(key=lambda x:x["OPS_plus"], reverse=True); pits.sort(key=lambda x:x["ERA_plus"], reverse=True)
+    bats=bats[:limit]; pits=pits[:limit]
+    out = {"season": season, "batting_top": bats, "pitching_top": pits}
+    if include_baselines: out["baselines"]={"league_ops": round(lg_ops,6), "league_era": round(lg_era,6)}
+    return out
+
+@app.get("/compare_teams")
+def compare_teams(season:int=Query(...,ge=1871,le=2100), teamA:str=Query(...), teamB:str=Query(...),
+                  modern_codes:bool=Query(True)):
+    conn = get_db(); lg_ops=league_ops(conn,season); lg_era=league_era(conn,season)
+    A_lah = REV_TEAM_CODE_MAP.get(teamA.upper(), teamA.upper())
+    B_lah = REV_TEAM_CODE_MAP.get(teamB.upper(), teamB.upper())
+    A_mod = TEAM_CODE_MAP.get(A_lah, A_lah) if modern_codes else A_lah
+    B_mod = TEAM_CODE_MAP.get(B_lah, B_lah) if modern_codes else B_lah
+    A_ops = round(_team_ops_plus(conn, season, A_lah),1); A_era = round(_team_era_plus(conn, season, A_lah),1)
+    B_ops = round(_team_ops_plus(conn, season, B_lah),1); B_era = round(_team_era_plus(conn, season, B_lah),1)
+    return {"season": season, "baselines":{"league_ops": round(lg_ops,6),"league_era": round(lg_era,6)},
+            "teams":[{"team":A_mod,"team_lahman":A_lah,"OPS_plus":A_ops,"ERA_plus":A_era},
+                     {"team":B_mod,"team_lahman":B_lah,"OPS_plus":B_ops,"ERA_plus":B_era}],
+            "delta":{"OPS_plus": round(A_ops-B_ops,1), "ERA_plus": round(A_era-B_era,1)}}
+
+@app.get("/team_power_rankings")
+def team_power_rankings(season:int=Query(...,ge=1871,le=2100), limit:int=Query(10,ge=1,le=50),
+                        bat_w:float=Query(0.5,ge=0.0), pit_w:float=Query(0.5,ge=0.0),
+                        modern_codes:bool=Query(True)):
+    conn = get_db()
+    rows=[]
+    for r in conn.execute("SELECT DISTINCT teamID FROM Teams WHERE yearID=?", (season,)).fetchall():
+        t = _rval(r,"teamID","")
+        opsp = _team_ops_plus(conn, season, t); erap = _team_era_plus(conn, season, t)
+        score = 100.0 + (opsp-100.0)*bat_w + (erap-100.0)*pit_w
+        rows.append({"team": TEAM_CODE_MAP.get(t,t) if modern_codes else t,
+                     "team_lahman": t, "season": season,
+                     "OPS_plus": round(opsp,1), "ERA_plus": round(erap,1),
+                     "score": round(score,1)})
+    rows.sort(key=lambda x:x["score"], reverse=True)
+    return {"season": season, "power": rows[:limit], "weights":{"bat_w": bat_w, "pit_w": pit_w}}
+
+# ----------------------------------------------------
+# Transactions / Contracts Suite
+# ----------------------------------------------------
+def _parse_csv_numbers(s: str) -> list[float]:
+    if s is None: return []
+    return [float(x.strip()) for x in s.split(",") if x.strip()]
+
+def _pv(series: list[float], dr: float) -> float:
+    return sum(val / pow(1.0 + dr, t) for t, val in enumerate(series, start=1))
+
+def _pad_to_equal_len(a: list[float], b: list[float]) -> Tuple[list[float], list[float]]:
+    n = min(len(a), len(b)) if (a and b) else max(len(a), len(b))
+    a = (a + [0.0]*(n-len(a)))[:n]; b = (b + [0.0]*(n-len(b)))[:n]; return a, b
+
+@app.get("/trade_value")
+def trade_value(
+    war: str = Query(..., description="Ex: 5,4.5,3"),
+    salary: str = Query(..., description="백만$ 단위 Ex: 1,8,20"),
+    dpw: float = Query(9.0, ge=0.0),
+    dr: float = Query(0.08, ge=0.0),
+    name: str = Query("", description="선택"),
+    playerID: str = Query("", description="선택")
+):
+    war_seq = _parse_csv_numbers(war); sal_seq = _parse_csv_numbers(salary); war_seq, sal_seq = _pad_to_equal_len(war_seq, sal_seq)
+    value_seq = [w*dpw for w in war_seq]; pv_value = _pv(value_seq, dr); pv_salary = _pv(sal_seq, dr); surplus = pv_value - pv_salary
+    per = [{"year_offset":i,"WAR":round(w,3),"value_mUSD":round(v,3),"salary_mUSD":round(s,3),"net_mUSD":round(v-s,3)}
+           for i,(w,s,v) in enumerate(zip(war_seq,sal_seq,value_seq), start=1)]
+    return {"player":{"name":name,"playerID":playerID},"params":{"dpw_mUSD":dpw,"discount_rate":dr},
+            "horizon_years":len(war_seq),"present_value":{"value_mUSD":round(pv_value,3),"salary_mUSD":round(pv_salary,3),
+            "surplus_mUSD":round(surplus,3)},"per_year":per}
+
+class PackageItem(BaseModel):
+    name: str = Field("", description="선수 이름")
+    playerID: str = Field("", description="선수 ID")
+    war: list[float]
+    salary: list[float]
+    dpw: float = 9.0
+
+class TradePackage(BaseModel):
+    discount_rate: float = 0.08
+    teamA: list[PackageItem] = Field(default_factory=list)
+    teamB: list[PackageItem] = Field(default_factory=list)
+
+def _surplus_item(item: PackageItem, dr: float) -> dict:
+    w, s = _pad_to_equal_len(item.war, item.salary)
+    value_seq = [x*item.dpw for x in w]
+    return {"name": item.name, "playerID": item.playerID,
+            "pv_value_mUSD": round(_pv(value_seq, dr),3),
+            "pv_salary_mUSD": round(_pv(s, dr),3),
+            "pv_surplus_mUSD": round(_pv(value_seq, dr) - _pv(s, dr),3)}
+
+@app.post("/trade_package_value")
+def trade_package_value(pkg: TradePackage = Body(...)):
+    dr = pkg.discount_rate
+    A = [_surplus_item(it, dr) for it in pkg.teamA]
+    B = [_surplus_item(it, dr) for it in pkg.teamB]
+    A_tot = round(sum(x["pv_surplus_mUSD"] for x in A),3)
+    B_tot = round(sum(x["pv_surplus_mUSD"] for x in B),3)
+    return {"discount_rate": dr, "teamA":{"items":A,"total_surplus_mUSD":A_tot},
+            "teamB":{"items":B,"total_surplus_mUSD":B_tot},
+            "delta_mUSD": round(A_tot-B_tot,3),
+            "interpretation":"양수면 TeamA 패키지가 더 비쌈(가치가 큼), 음수면 TeamB가 더 비쌈"}
+
+@app.get("/contract_compare")
+def contract_compare(
+    name1: str = Query("Contract A"), war1: str = Query(...), salary1: str = Query(...),
+    name2: str = Query("Contract B"), war2: str = Query(...), salary2: str = Query(...),
+    dpw: float = Query(9.0, ge=0.0), dr: float = Query(0.08, ge=0.0)
+):
+    w1 = _parse_csv_numbers(war1); s1 = _parse_csv_numbers(salary1); w1, s1 = _pad_to_equal_len(w1, s1)
+    w2 = _parse_csv_numbers(war2); s2 = _parse_csv_numbers(salary2); w2, s2 = _pad_to_equal_len(w2, s2)
+    def summarize(name, w, s):
+        value_seq = [x*dpw for x in w]; pv_v=_pv(value_seq,dr); pv_s=_pv(s,dr); surplus=pv_v-pv_s
+        tot_war=sum(w); tot_sal=sum(s); dpw_real=(tot_sal/tot_war) if tot_war>0 else None
+        return {"name":name,"years":len(w),"total_WAR":round(tot_war,3),"total_salary_mUSD":round(tot_sal,3),
+                "pv_value_mUSD":round(pv_v,3),"pv_salary_mUSD":round(pv_s,3),
+                "pv_surplus_mUSD":round(surplus,3),"implied_$perWAR_mUSD":(round(dpw_real,3) if dpw_real is not None else None)}
+    A=summarize(name1,w1,s1); B=summarize(name2,w2,s2)
+    return {"params":{"dpw_mUSD":dpw,"discount_rate":dr},"A":A,"B":B,
+            "delta_surplus_mUSD": round(A["pv_surplus_mUSD"]-B["pv_surplus_mUSD"],3)}
+
+# ----------------------------------------------------
+# Progress (자동 집계)
+# ----------------------------------------------------
+FEATURES = {
+    # Player
+    "get_player_stats": True,
+    "get_pitching_stats": True,
+    "get_player_trend": True,
+    "compare_players": True,
+    "player_power_rankings": True,
+    "player_search": True,
+    # Team
+    "get_team_stats": True,
+    "get_team_trend": True,
+    "team_leaderboard": True,
+    "compare_teams": True,
+    "team_power_rankings": True,
+    "team_code_map": True,
+    # Tx/Contracts
+    "trade_value": True,
+    "trade_package_value": True,
+    "contract_compare": True,
+    # Ops/Diag
+    "_ping": True,
+    "_metrics": True,
+    "debug_league": True,
+}
+TOTAL_FEATURES = 49
+
+@app.get("/progress")
+def progress():
+    completed = sum(1 for k,v in FEATURES.items() if v)
+    pending = max(TOTAL_FEATURES - completed, 0)
+    return {"total_features": TOTAL_FEATURES, "completed": completed, "pending": pending,
+            "completion_rate": round(100.0*completed/TOTAL_FEATURES, 2),
+            "buckets": {
+                "Player_Suite": 6,
+                "Team_Suite": 5,
+                "Tx_Contracts": 3,
+                "Ops_Diagnostics": 3
+            }}
+
+# === End of file ===

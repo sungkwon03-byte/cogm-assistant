@@ -1,0 +1,415 @@
+cat > app/main.py <<'PY'
+from fastapi import FastAPI, Query
+from typing import Optional, List, Dict, Any
+import sqlite3, os, math
+
+DB_PATH = os.getenv("DB_PATH", "data/lahman.sqlite")
+
+app = FastAPI(title="Co-GM Assistant (clean main)")
+
+# ---------- DB / Helpers ----------
+def get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _rval(row, key, default=0):
+    if row is None: return default
+    v = row[key] if key in row.keys() else default
+    return 0 if v is None else v
+
+def safe_div(n, d):
+    return (n / d) if d else 0.0
+
+def compute_obp(H, BB, HBP, AB, SF):
+    H = H or 0; BB = BB or 0; HBP = HBP or 0; AB = AB or 0; SF = SF or 0
+    den = AB + BB + HBP + SF
+    return (H + BB + HBP) / den if den else 0.0
+
+def compute_slg(H, D2, D3, HR, AB):
+    H = H or 0; D2 = D2 or 0; D3 = D3 or 0; HR = HR or 0; AB = AB or 0
+    singles = H - (D2 + D3 + HR)
+    tb = singles + 2*D2 + 3*D3 + 4*HR
+    return tb / AB if AB else 0.0
+
+# ---------- League baselines ----------
+def league_ops_raw(conn, year: int) -> Dict[str, float]:
+    r = conn.execute(
+        """
+        SELECT
+          SUM(H)   AS H,
+          SUM(BB)  AS BB,
+          COALESCE(SUM(HBP),0) AS HBP,
+          SUM(AB)  AS AB,
+          COALESCE(SUM(SF),0)  AS SF,
+          SUM("2B") AS D2,
+          SUM("3B") AS D3,
+          SUM(HR)  AS HR
+        FROM Batting
+        WHERE yearID=?
+        """, (year,)
+    ).fetchone()
+    if not r or (_rval(r,"AB",0) == 0):
+        return {"lg_ops": 0.0}
+    obp = compute_obp(_rval(r,"H"), _rval(r,"BB"), _rval(r,"HBP"), _rval(r,"AB"), _rval(r,"SF"))
+    slg = compute_slg(_rval(r,"H"), _rval(r,"D2"), _rval(r,"D3"), _rval(r,"HR"), _rval(r,"AB"))
+    return {"lg_ops": obp + slg}
+
+def league_ops(conn, year: int) -> float:
+    return league_ops_raw(conn, year)["lg_ops"]
+
+def league_era_raw(conn, year: int) -> Dict[str, float]:
+    r = conn.execute(
+        """
+        SELECT SUM(ER) AS ER, SUM(IPouts) AS IPouts
+        FROM Pitching
+        WHERE yearID=?
+        """, (year,)
+    ).fetchone()
+    ip = safe_div(_rval(r,"IPouts",0), 3.0)
+    if not r or ip <= 0:
+        return {"lg_era": 0.0}
+    era = 9.0 * safe_div(_rval(r,"ER",0), ip)
+    return {"lg_era": era}
+
+def league_era(conn, year: int) -> float:
+    return league_era_raw(conn, year)["lg_era"]
+
+# ---------- Code maps ----------
+LAHMAN_TO_MODERN = {
+    "LAN":"LAD","SFN":"SFG","TBA":"TBR","NYA":"NYY","NYN":"NYM","CHN":"CHC","CHA":"CWS",
+    "SDN":"SDP","SLN":"STL","KCA":"KC","ANA":"LAA","ML4":"MIL","FLA":"MIA","WAS":"WSH"
+}
+def to_modern(teamid:str) -> str:
+    return LAHMAN_TO_MODERN.get(teamid, teamid)
+
+# ---------- Utility: resolve player ----------
+def resolve_player_id(conn, q: str) -> Optional[str]:
+    qn = q.strip().lower()
+    row = conn.execute(
+        """
+        SELECT playerID, nameFirst, nameLast
+        FROM People
+        WHERE lower(nameFirst||' '||nameLast) = ?
+        LIMIT 1
+        """, (qn,)
+    ).fetchone()
+    if row: return row["playerID"]
+
+    row = conn.execute(
+        """
+        SELECT playerID, nameFirst, nameLast
+        FROM People
+        WHERE lower(nameFirst||' '||nameLast) LIKE ?
+           OR lower(nameLast||' '||nameFirst) LIKE ?
+           OR lower(playerID) LIKE ?
+        ORDER BY nameLast, nameFirst
+        LIMIT 1
+        """, (f"%{qn}%", f"%{qn}%", f"%{qn}%")
+    ).fetchone()
+    return row["playerID"] if row else None
+
+def player_name_by_id(conn, pid: str) -> str:
+    r = conn.execute("SELECT nameFirst, nameLast FROM People WHERE playerID=?", (pid,)).fetchone()
+    if not r: return pid
+    first = _rval(r,"nameFirst","")
+    last  = _rval(r,"nameLast","")
+    return f"{first} {last}".strip() or pid
+
+# ---------- Basic endpoints ----------
+@app.get("/_ping")
+def _ping():
+    return {"ok": True}
+
+@app.get("/_metrics")
+def _metrics():
+    return {"db_path": DB_PATH}
+
+# ---------- Search ----------
+@app.get("/player_search")
+def player_search(q: str = Query(..., min_length=1)):
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT playerID, nameFirst, nameLast
+            FROM People
+            WHERE lower(nameFirst||' '||nameLast) LIKE ?
+               OR lower(nameLast||' '||nameFirst) LIKE ?
+               OR lower(playerID) LIKE ?
+            ORDER BY nameLast, nameFirst
+            LIMIT 50
+            """, (f"%{q.lower()}%", f"%{q.lower()}%", f"%{q.lower()}%")
+        ).fetchall()
+        out = [{"playerID": r["playerID"], "name": f'{_rval(r,"nameFirst","")} {_rval(r,"nameLast","")}'.strip()} for r in rows]
+        return {"query": q, "results": out}
+
+# ---------- Player stats ----------
+@app.get("/get_player_stats")
+def get_player_stats(name: str, season: int):
+    with get_conn() as conn:
+        pid = resolve_player_id(conn, name)
+        if not pid:
+            return {"player": name, "error": "player_not_found"}
+        r = conn.execute(
+            """
+            SELECT
+              SUM(H) as H, SUM(BB) as BB, SUM(COALESCE(HBP,0)) as HBP,
+              SUM(AB) as AB, SUM(COALESCE(SF,0)) as SF,
+              SUM("2B") as D2, SUM("3B") as D3, SUM(HR) as HR
+            FROM Batting
+            WHERE playerID=? AND yearID=?
+            """, (pid, season)
+        ).fetchone()
+        H=_rval(r,"H"); BB=_rval(r,"BB"); HBP=_rval(r,"HBP"); AB=_rval(r,"AB"); SF=_rval(r,"SF")
+        D2=_rval(r,"D2"); D3=_rval(r,"D3"); HR=_rval(r,"HR")
+        obp = round(compute_obp(H,BB,HBP,AB,SF), 3)
+        slg = round(compute_slg(H,D2,D3,HR,AB), 3)
+        ops = obp + slg
+        lg  = league_ops(conn, season)
+        opsp = round(100.0 * safe_div(ops, lg), 1) if lg else 0.0
+        name_full = player_name_by_id(conn, pid)
+        return {"player": name_full, "playerID": pid, "season": season,
+                "OBP": obp, "SLG": slg, "OPS": round(ops,3), "OPS_plus": opsp, "HR": HR}
+
+@app.get("/get_pitching_stats")
+def get_pitching_stats(name: str, season: int):
+    with get_conn() as conn:
+        pid = resolve_player_id(conn, name)
+        if not pid:
+            return {"player": name, "error": "player_not_found"}
+        r = conn.execute(
+            """
+            SELECT SUM(ER) as ER, SUM(IPouts) as IPouts, SUM(SO) as SO, SUM(BB) as BB, SUM(H) as H
+            FROM Pitching
+            WHERE playerID=? AND yearID=?
+            """, (pid, season)
+        ).fetchone()
+        ip = safe_div(_rval(r,"IPouts",0), 3.0)
+        ERA = 9.0 * safe_div(_rval(r,"ER",0), ip) if ip>0 else 0.0
+        K9  = 9.0 * safe_div(_rval(r,"SO",0), ip) if ip>0 else 0.0
+        BB9 = 9.0 * safe_div(_rval(r,"BB",0), ip) if ip>0 else 0.0
+        WHIP= safe_div((_rval(r,"BB",0)+_rval(r,"H",0)), ip) if ip>0 else 0.0
+        lgE = league_era(conn, season)
+        ERAp= round(100.0 * safe_div(lgE, ERA), 1) if ERA>0 else 0.0
+        name_full = player_name_by_id(conn, pid)
+        return {"player": name_full, "playerID": pid, "season": season,
+                "IP": round(ip,1), "ERA": round(ERA,2), "ERA_plus": ERAp,
+                "K9": round(K9,2), "BB9": round(BB9,2), "WHIP": round(WHIP,2)}
+
+# ---------- Player trend ----------
+@app.get("/get_player_trend")
+def get_player_trend(name: str, season: int, years: int = 3):
+    with get_conn() as conn:
+        pid = resolve_player_id(conn, name)
+        if not pid:
+            return {"player": name, "error": "player_not_found"}
+        out = []
+        for y in range(season-years+1, season+1):
+            # batting
+            rb = conn.execute(
+                """
+                SELECT SUM(H) H, SUM(BB) BB, COALESCE(SUM(HBP),0) HBP,
+                       SUM(AB) AB, COALESCE(SUM(SF),0) SF,
+                       SUM("2B") D2, SUM("3B") D3, SUM(HR) HR
+                FROM Batting WHERE playerID=? AND yearID=?
+                """,(pid,y)
+            ).fetchone()
+            H=_rval(rb,"H"); BB=_rval(rb,"BB"); HBP=_rval(rb,"HBP"); AB=_rval(rb,"AB"); SF=_rval(rb,"SF")
+            D2=_rval(rb,"D2"); D3=_rval(rb,"D3"); HR=_rval(rb,"HR")
+            obp = compute_obp(H,BB,HBP,AB,SF)
+            slg = compute_slg(H,D2,D3,HR,AB)
+            ops = obp + slg
+            lg  = league_ops(conn, y)
+            OPSp = round(100.0 * safe_div(ops, lg), 1) if lg else 0.0
+            # pitching
+            rp = conn.execute(
+                """SELECT SUM(ER) ER, SUM(IPouts) IPouts FROM Pitching WHERE playerID=? AND yearID=?""",
+                (pid,y)
+            ).fetchone()
+            ip = safe_div(_rval(rp,"IPouts",0), 3.0)
+            ERA = 9.0 * safe_div(_rval(rp,"ER",0), ip) if ip>0 else 0.0
+            lgE = league_era(conn, y)
+            ERAp= round(100.0 * safe_div(lgE, ERA), 1) if ERA>0 else 0.0
+            out.append({"season": y, "OPS_plus": OPSp, "ERA_plus": ERAp})
+        return {"player": player_name_by_id(conn, pid), "playerID": pid, "trend": out}
+
+# ---------- Player power rankings ----------
+@app.get("/player_power_rankings")
+def player_power_rankings(season: int, limit: int = 20, include_baselines: bool = False):
+    with get_conn() as conn:
+        lg_ops = league_ops(conn, season)
+        lg_era = league_era(conn, season)
+
+        bat = conn.execute(
+            """
+            WITH agg AS (
+              SELECT playerID,
+                     SUM(H) H, SUM(BB) BB, COALESCE(SUM(HBP),0) HBP,
+                     SUM(AB) AB, COALESCE(SUM(SF),0) SF,
+                     SUM("2B") D2, SUM("3B") D3, SUM(HR) HR
+              FROM Batting WHERE yearID=? GROUP BY playerID
+            )
+            SELECT a.playerID, p.nameFirst, p.nameLast,
+                   a.H, a.BB, a.HBP, a.AB, a.SF, a.D2, a.D3, a.HR
+            FROM agg a LEFT JOIN People p USING(playerID)
+            """,(season,)
+        ).fetchall()
+        bat_list=[]
+        for r in bat:
+            obp = compute_obp(_rval(r,"H"),_rval(r,"BB"),_rval(r,"HBP"),_rval(r,"AB"),_rval(r,"SF"))
+            slg = compute_slg(_rval(r,"H"),_rval(r,"D2"),_rval(r,"D3"),_rval(r,"HR"),_rval(r,"AB"))
+            opsp= round(100.0 * safe_div(obp+slg, lg_ops), 1) if lg_ops else 0.0
+            bat_list.append({
+                "playerID": r["playerID"], "name": f'{_rval(r,"nameFirst","")} {_rval(r,"nameLast","")}'.strip(),
+                "season": season, "OPS_plus": opsp
+            })
+        bat_list.sort(key=lambda x: x["OPS_plus"], reverse=True)
+        bat_list = bat_list[:limit]
+
+        pit = conn.execute(
+            """
+            WITH agg AS (
+              SELECT playerID, SUM(ER) ER, SUM(IPouts) IPouts
+              FROM Pitching WHERE yearID=? GROUP BY playerID
+            )
+            SELECT a.playerID, p.nameFirst, p.nameLast, a.ER, a.IPouts
+            FROM agg a LEFT JOIN People p USING(playerID)
+            """,(season,)
+        ).fetchall()
+        pit_list=[]
+        for r in pit:
+            ip = safe_div(_rval(r,"IPouts",0),3.0)
+            ERA = 9.0 * safe_div(_rval(r,"ER",0), ip) if ip>0 else 0.0
+            ERAp= round(100.0 * safe_div(lg_era, ERA), 1) if ERA>0 else 0.0
+            pit_list.append({
+                "playerID": r["playerID"], "name": f'{_rval(r,"nameFirst","")} {_rval(r,"nameLast","")}'.strip(),
+                "season": season, "ERA_plus": ERAp
+            })
+        pit_list.sort(key=lambda x: x["ERA_plus"], reverse=True)
+        pit_list = pit_list[:limit]
+
+        out = {"season": season, "baselines": {"league_ops": round(lg_ops,6), "league_era": round(lg_era,6)},
+               "bat": bat_list, "pit": pit_list}
+        if include_baselines:
+            return out
+        return out
+# ---------- Team leaderboard ----------
+@app.get("/team_leaderboard")
+def team_leaderboard(season: int, limit: int = 30):
+    with get_conn() as conn:
+        lg_ops = league_ops(conn, season)
+        lg_era = league_era(conn, season)
+
+        # Batting by team (Lahman teamID)
+        bat = conn.execute(
+            """
+            SELECT teamID, 
+                   SUM(H) H, SUM(BB) BB, COALESCE(SUM(HBP),0) HBP,
+                   SUM(AB) AB, COALESCE(SUM(SF),0) SF,
+                   SUM("2B") D2, SUM("3B") D3, SUM(HR) HR
+            FROM Batting
+            WHERE yearID=?
+            GROUP BY teamID
+            """,(season,)
+        ).fetchall()
+        top_bat=[]
+        for r in bat:
+            obp = compute_obp(_rval(r,"H"),_rval(r,"BB"),_rval(r,"HBP"),_rval(r,"AB"),_rval(r,"SF"))
+            slg = compute_slg(_rval(r,"H"),_rval(r,"D2"),_rval(r,"D3"),_rval(r,"HR"),_rval(r,"AB"))
+            opsp= round(100.0 * safe_div(obp+slg, lg_ops), 1) if lg_ops else 0.0
+            top_bat.append({"team": to_modern(r["teamID"]), "season": season, "OPS_plus": opsp})
+        top_bat.sort(key=lambda x: x["OPS_plus"], reverse=True)
+        top_bat = top_bat[:limit]
+
+        # Pitching by team
+        pit = conn.execute(
+            """
+            SELECT teamID, SUM(ER) ER, SUM(IPouts) IPouts
+            FROM Pitching
+            WHERE yearID=?
+            GROUP BY teamID
+            """,(season,)
+        ).fetchall()
+        top_pit=[]
+        for r in pit:
+            ip = safe_div(_rval(r,"IPouts",0),3.0)
+            ERA = 9.0 * safe_div(_rval(r,"ER",0), ip) if ip>0 else 0.0
+            ERAp= round(100.0 * safe_div(lg_era, ERA), 1) if ERA>0 else 0.0
+            top_pit.append({"team": to_modern(r["teamID"]), "season": season, "ERA_plus": ERAp})
+        top_pit.sort(key=lambda x: x["ERA_plus"], reverse=True)
+        top_pit = top_pit[:limit]
+
+        return {"season": season,
+                "baselines": {"league_ops": round(lg_ops,6), "league_era": round(lg_era,6)},
+                "top_bat": top_bat, "top_pit": top_pit}
+
+# ---------- Team power rankings ----------
+@app.get("/team_power_rankings")
+def team_power_rankings(season: int, limit: int = 30, bat_w: float = 0.5, pit_w: float = 0.5):
+    lb = team_leaderboard(season=season, limit=9999)
+    teams = {}
+    for b in lb["top_bat"]:
+        teams.setdefault(b["team"], {})["OPS_plus"] = b["OPS_plus"]
+    for p in lb["top_pit"]:
+        teams.setdefault(p["team"], {})["ERA_plus"] = p["ERA_plus"]
+    out=[]
+    for t, v in teams.items():
+        opsp = v.get("OPS_plus", 0.0)
+        erap = v.get("ERA_plus", 0.0)
+        score = round(bat_w*opsp + pit_w*erap, 2)
+        out.append({"team": t, "season": season, "OPS_plus": opsp, "ERA_plus": erap, "score": score})
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out[:limit]
+
+# ---------- Compare players ----------
+@app.get("/compare_players", operation_id="compare_players")
+def compare_players(name1: str, name2: str, season: int):
+    with get_conn() as conn:
+        pid1 = resolve_player_id(conn, name1)
+        pid2 = resolve_player_id(conn, name2)
+        if not pid1 or not pid2:
+            return {"error": "resolve_failed", "season": season,
+                    "resolved": {"name1": name1, "playerID1": pid1, "name2": name2, "playerID2": pid2}}
+        # OPS+
+        def ops_plus(pid):
+            r = conn.execute(
+                """
+                SELECT SUM(H) H, SUM(BB) BB, COALESCE(SUM(HBP),0) HBP,
+                       SUM(AB) AB, COALESCE(SUM(SF),0) SF,
+                       SUM("2B") D2, SUM("3B") D3, SUM(HR) HR
+                FROM Batting WHERE playerID=? AND yearID=?
+                """, (pid, season)
+            ).fetchone()
+            obp = compute_obp(_rval(r,"H"),_rval(r,"BB"),_rval(r,"HBP"),_rval(r,"AB"),_rval(r,"SF"))
+            slg = compute_slg(_rval(r,"H"),_rval(r,"D2"),_rval(r,"D3"),_rval(r,"HR"),_rval(r,"AB"))
+            lg  = league_ops(conn, season)
+            return round(100.0 * safe_div(obp+slg, lg), 1) if lg else 0.0
+        # ERA+ (if pitched)
+        def era_plus(pid):
+            r = conn.execute(
+                """SELECT SUM(ER) ER, SUM(IPouts) IPouts FROM Pitching WHERE playerID=? AND yearID=?""",
+                (pid, season)
+            ).fetchone()
+            ip = safe_div(_rval(r,"IPouts",0),3.0)
+            if ip <= 0: return 0.0
+            ERA = 9.0 * safe_div(_rval(r,"ER",0), ip)
+            lgE = league_era(conn, season)
+            return round(100.0 * safe_div(lgE, ERA), 1) if ERA>0 else 0.0
+
+        out = {
+            "season": season,
+            "resolved": {
+                "name1": player_name_by_id(conn, pid1), "playerID1": pid1,
+                "name2": player_name_by_id(conn, pid2), "playerID2": pid2
+            },
+            "hitters": [
+                {"player": player_name_by_id(conn, pid1), "playerID": pid1, "season": season, "OPS_plus": ops_plus(pid1)},
+                {"player": player_name_by_id(conn, pid2), "playerID": pid2, "season": season, "OPS_plus": ops_plus(pid2)},
+            ],
+            "pitchers": []
+        }
+        e1, e2 = era_plus(pid1), era_plus(pid2)
+        if e1>0: out["pitchers"].append({"player": player_name_by_id(conn, pid1), "playerID": pid1, "season": season, "ERA_plus": e1})
+        if e2>0: out["pitchers"].append({"player": player_name_by_id(conn, pid2), "playerID": pid2, "season": season, "ERA_plus": e2})
+        return out
+PY

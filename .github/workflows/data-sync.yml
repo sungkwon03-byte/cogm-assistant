@@ -1,0 +1,27 @@
+name: Data Sync (Lahman + 2025)
+on:
+  schedule:
+    - cron: "0 7 * * 1"   # 매주 월요일 07:00 UTC
+  workflow_dispatch: {}
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install --quiet requests
+      - name: Build & Update Lahman
+        run: python tools/lahman_sync.py
+      - name: Build id_map from Chadwick Register
+        run: python tools/idmap_sync.py
+      - name: Ingest MLB 2025 season (StatsAPI)
+        env:
+          SEASON: "2025"
+          STATSAPI_QPS: "3.0"
+        run: python tools/mlb_2025_ingest.py
+      # 산출물 보관(옵션): DB 파일을 Actions artifact로 저장
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lahman-sqlite
+          path: data/lahman.sqlite
