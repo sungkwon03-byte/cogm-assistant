@@ -383,3 +383,35 @@ def get_player_trend(name: str, season: int, years: int = 3):
         OPS = OBP + SLG
         trend.append({"season": r["season"], "ops": _round(OPS, 3)})
     return {"player": name, "playerID": pid, "trend": trend}
+
+# === Co-GM attach (append-only, do not move) ===
+try:
+    from player_intel_core import attach_player_intel, _unhandled_exc_handler
+    try:
+        app.add_exception_handler(Exception, _unhandled_exc_handler)
+    except Exception:
+        pass
+    attach_player_intel(app)
+    _COGM_ATTACHED = True
+except Exception as e:
+    _COGM_ATTACHED = False
+    import traceback as _tb
+    _COGM_ATTACH_ERR = {
+        "error": f"{type(e).__name__}: {e}",
+        "stack_tail": "".join(_tb.format_exception(type(e), e, e.__traceback__))[-1200:]
+    }
+
+# Diagnostics
+try:
+    @app.get("/_routes")
+    def _routes():
+        return [getattr(r, "path", str(r)) for r in app.router.routes]
+except Exception:
+    pass
+
+try:
+    @app.get("/_startup_errors")
+    def _startup_errors():
+        return {"attached": _COGM_ATTACHED, "error": (None if _COGM_ATTACHED else _COGM_ATTACH_ERR)}
+except Exception:
+    pass
