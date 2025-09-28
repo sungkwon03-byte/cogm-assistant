@@ -900,3 +900,608 @@ async def _regression_smoke():
         errs.append(f"repl:{type(e).__name__}")
     ok = len(errs) == 0
     return {"ok": ok, "errors": errs}
+
+# ========= Day8: #29 일정 분석 / #35 승률 예측 =========
+from pydantic import BaseModel
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta, date
+import math
+
+# ----- 유틸 -----
+def _parse_ymd(s: str) -> date:
+    return datetime.strptime(s, "%Y-%m-%d").date()
+
+def _stable_rng01(seed: int) -> float:
+    # 시드 기반 0~1 난수(안정적)
+    x = (seed * 9301 + 49297) % 233280
+    return x / 233280.0
+
+# ===== #29 일정 분석 =====
+class ScheduleAnalyzeResponse(BaseModel):
+    team: str
+    date_from: str
+    date_to: str
+    days: int
+    games: int
+    back_to_backs: int
+    rest_days: int
+    travel_km_stub: int
+    opp_strength_stub: float
+    fatigue_index: float  # 0~100
+
+@router.get("/schedule/analyze", response_model=ScheduleAnalyzeResponse)
+async def schedule_analyze(team: str, from_: str, to: str):
+    d0 = _parse_ymd(from_)
+    d1 = _parse_ymd(to)
+    if d1 < d0:
+        d0, d1 = d1, d0
+    days = (d1 - d0).days + 1
+
+    # 시드: 팀+기간
+    seed = _seed_from(team, d0.year) + days * 37
+    r1 = _stable_rng01(seed + 11)
+    r2 = _stable_rng01(seed + 23)
+    r3 = _stable_rng01(seed + 31)
+    r4 = _stable_rng01(seed + 47)
+
+    # 간단 스텁 로직: 기간 중 경기수, 백투백, 휴식일, 이동거리, 상대강도
+    games = max(0, int(round(days * (0.6 + 0.25 * r1))))
+    back_to_backs = max(0, int(round(games * (0.10 + 0.10 * r2))))
+    rest_days = max(0, days - math.ceil(games * 1.05))
+    travel_km_stub = int( (300 + 1700 * r3) * max(1, days/10) )  # 대략적 스케일
+    opp_strength = round(0.45 + 0.15 * r4, 3)  # 0.45~0.60
+
+    # 피로 지수: 경기밀도/백투백/이동거리/상대강도 종합
+    density = games / max(1, days)
+    fatigue = (
+        45.0 * density +
+        25.0 * (back_to_backs / max(1, games)) +
+        20.0 * min(1.0, travel_km_stub / 5000.0) +
+        10.0 * (opp_strength - 0.5 + 0.5)
+    )
+    fatigue = round(_clamp(fatigue, 0.0, 100.0), 1)
+
+    return ScheduleAnalyzeResponse(
+        team=team, date_from=d0.isoformat(), date_to=d1.isoformat(), days=days,
+        games=games, back_to_backs=back_to_backs, rest_days=rest_days,
+        travel_km_stub=travel_km_stub, opp_strength_stub=opp_strength,
+        fatigue_index=fatigue
+    )
+
+# ===== #35 승률/WP 예측 =====
+class WinProbQuery(BaseModel):
+    home: str
+    away: str
+    elo_home: float
+    elo_away: float
+    park: float = 1.00            # 1.00=중립, 1.02=타자친화 등
+    sp_adj: Optional[float] = 0.0 # 선발 매치업 보정(+면 홈 유리)
+    home_field_pts: float = 20.0  # 엘로 점수로 15~25 권장
+    pyth_rs_home: Optional[float] = None
+    pyth_ra_home: Optional[float] = None
+    pyth_exp: float = 1.83        # 피타고라스 지수
+
+class WinProbResponse(BaseModel):
+    home: str
+    away: str
+    wp_home: float
+    wp_away: float
+    components: Dict[str, float]
+
+@router.post("/forecast/win_prob", response_model=WinProbResponse)
+async def forecast_win_prob(q: WinProbQuery):
+    # 엘로 차이 + 홈 보정 + 구장/선발 보정
+    diff = (q.elo_home - q.elo_away) + q.home_field_pts + 100.0 * (q.park - 1.0) + (q.sp_adj or 0.0)
+    # 로지스틱 변환 (엘로 전통식)
+    p_home = 1.0 / (1.0 + math.pow(10.0, -diff / 400.0))
+    # 피타고라스 보정(선택)
+    pyth = None
+    if q.pyth_rs_home is not None and q.pyth_ra_home is not None and q.pyth_rs_home >= 0 and q.pyth_ra_home >= 0:
+        rs = q.pyth_rs_home; ra = q.pyth_ra_home
+        denom = math.pow(rs, q.pyth_exp) + math.pow(ra, q.pyth_exp)
+        if denom > 0:
+            pyth = float(math.pow(rs, q.pyth_exp) / denom)
+            # 간단히 평균(50% 반영)으로 섞기
+            p_home = 0.5 * p_home + 0.5 * pyth
+
+    p_home = float(round(_clamp(p_home, 0.0, 1.0), 4))
+    p_away = float(round(1.0 - p_home, 4))
+    return WinProbResponse(
+        home=q.home, away=q.away, wp_home=p_home, wp_away=p_away,
+        components={
+            "elo_diff_effect": round(diff, 2),
+            "park": q.park,
+            "sp_adj": float(q.sp_adj or 0.0),
+            "home_field_pts": q.home_field_pts,
+            **({"pyth_home": round(pyth,4)} if pyth is not None else {})
+        }
+    )
+
+# ========= Day9: #24 팀 컬러-핏 매칭 / #33 데일리 파크팩터 =========
+from pydantic import BaseModel
+from typing import List, Dict, Optional
+from datetime import datetime
+
+# ===== #24 팀 컬러-핏 매칭 =====
+# 간단 규칙:
+# - needs와 후보의 tools 교집합 크기 가중(70%)
+# - LHH/RHH 선호 보정(20%)
+# - 포지션/유틸리티 보정(10%) — pos가 일치하거나 "UTL" 포함 시 가점
+_NEED_SYNONYM = {
+    "LHH": {"LHH","L","LH","Left"},
+    "RHH": {"RHH","R","RH","Right"},
+    "POW": {"POW","PWR","POWER"},
+    "DEF": {"DEF","D","FIELD","GLOVE"},
+    "SPD": {"SPD","RUN","SPEED"},
+    "OBP": {"OBP","DISC","BB"},
+}
+
+def _norm_need(x: str) -> str:
+    x = (x or "").upper()
+    for k, al in _NEED_SYNONYM.items():
+        if x in al:
+            return k
+    return x
+
+class TeamFitCandidate(BaseModel):
+    player_id: str
+    bats: Optional[str] = None   # "L"|"R"|"S"
+    tools: List[str] = []        # ["POW","DEF","SPD",...]
+    pos: Optional[str] = None    # "1B","RF","UTL" 등
+
+class TeamFitQuery(BaseModel):
+    team: str
+    needs: List[str]
+    candidates: List[TeamFitCandidate]
+    top_n: int = 5
+
+class TeamFitRow(BaseModel):
+    player_id: str
+    score: float
+    reasons: List[str]
+
+class TeamFitResponse(BaseModel):
+    team: str
+    ranked: List[TeamFitRow]
+
+@router.post("/scouting/team_fit", response_model=TeamFitResponse)
+async def team_fit(q: TeamFitQuery):
+    needs = [_norm_need(n) for n in q.needs]
+    out: List[TeamFitRow] = []
+    for c in q.candidates:
+        ctools = { _norm_need(t) for t in (c.tools or []) }
+        # 1) needs-툴 매칭
+        inter = ctools.intersection(needs)
+        base = 0.7 * (len(inter) / max(1, len(needs)))
+        reasons = []
+        if inter:
+            reasons.append(f"needs_matched:{','.join(sorted(inter))}")
+        # 2) 좌우타 보정
+        bats = (c.bats or "").upper()
+        lh_bonus = 0.2 if ("LHH" in needs and bats == "L") else 0.0
+        rh_bonus = 0.2 if ("RHH" in needs and bats == "R") else 0.0
+        if lh_bonus: reasons.append("bats:LHH_fit")
+        if rh_bonus: reasons.append("bats:RHH_fit")
+        # 3) 포지션/유틸 보정
+        pos_bonus = 0.1 if (c.pos in needs or (c.pos == "UTL") or any(p in (c.pos or "") for p in ("UTL","OF","IF"))) else 0.0
+        if pos_bonus: reasons.append("pos_flex")
+        score = round(min(1.0, base + lh_bonus + rh_bonus + pos_bonus), 4)
+        out.append(TeamFitRow(player_id=c.player_id, score=score, reasons=reasons or ["baseline"]))
+    out.sort(key=lambda r: r.score, reverse=True)
+    return TeamFitResponse(team=q.team, ranked=out[: q.top_n])
+
+# ===== #33 구장 파크팩터(데일리) =====
+class ParkFactorsResponse(BaseModel):
+    park: str
+    date: str
+    run_factor: float    # R
+    hr_factor: float     # HR
+    xbh_factor: float    # 2B/3B 가중
+
+def _seed_from_str(s: str) -> int:
+    return sum(ord(ch) for ch in (s or "")) % 10_000_019
+
+@router.get("/parks/daily_factors", response_model=ParkFactorsResponse)
+async def parks_daily_factors(park: str, date: str):
+    # 날짜 파싱 + 안정 난수로 일별 변동 (±3% 내외)
+    try:
+        d = datetime.strptime(date, "%Y-%m-%d").date()
+    except Exception:
+        # 잘못된 날짜는 오늘로 처리(스텁)
+        d = datetime.utcnow().date()
+    seed = (_seed_from_str(park) * 97 + d.toordinal() * 131) % 1_000_003
+    # 안정 난수 0~1 세 개
+    def rng(k: int) -> float:
+        x = (seed + k*7919) % 233280
+        return x / 233280.0
+    base_run = 1.00 + (rng(1) - 0.5) * 0.06   # ±3%
+    base_hr  = 1.00 + (rng(2) - 0.5) * 0.08   # ±4%
+    base_xbh = 1.00 + (rng(3) - 0.5) * 0.04   # ±2%
+    return ParkFactorsResponse(
+        park=park,
+        date=d.isoformat(),
+        run_factor=round(float(base_run), 3),
+        hr_factor=round(float(base_hr), 3),
+        xbh_factor=round(float(base_xbh), 3),
+    )
+
+# ========= Day10: #31 인-게임 레버리지 어시스트 / #32 심판 EUZ 편향(스텁) =========
+from pydantic import BaseModel
+from typing import List, Dict, Optional
+
+# ===== #31 인-게임 레버리지 어시스트 =====
+class LeverageQuery(BaseModel):
+    inning: int          # 1~9(+)
+    score_diff: int      # 홈 관점: 홈-원정
+    outs: int            # 0/1/2
+    base: str            # "0", "1B", "2B", "3B", "1B2B", "1B3B", "2B3B", "123"
+    batter: Optional[str] = None  # "L"|"R"
+    pitcher: Optional[str] = None # "L"|"R"
+
+class LeverageSuggestion(BaseModel):
+    move: str
+    rationale: str
+    impact_hint: float   # -1.0~+1.0 (추정)
+
+class LeverageResponse(BaseModel):
+    ctx: Dict[str, str]
+    suggestions: List[LeverageSuggestion]
+
+def _base_state_factor(b: str) -> float:
+    # 주자 상황 가치 가중(스텁)
+    mapping = {
+        "0": 0.00, "1B": 0.08, "2B": 0.15, "3B": 0.18,
+        "1B2B": 0.22, "1B3B": 0.26, "2B3B": 0.28, "123": 0.32
+    }
+    return mapping.get(b.upper(), 0.0)
+
+@router.post("/game/leverage_assist", response_model=LeverageResponse)
+async def leverage_assist(q: LeverageQuery):
+    hi_leverage = (q.inning >= 7 and abs(q.score_diff) <= 2)
+    handed_bonus = 0.05 if (q.batter and q.pitcher and q.batter != q.pitcher) else 0.0
+    base_val = _base_state_factor(q.base)
+    close_game = max(0.0, 0.2 - 0.05*abs(q.score_diff))
+    leverage_idx = round(min(1.0, base_val + close_game + (0.1 if hi_leverage else 0.0)), 3)
+
+    suggestions: List[LeverageSuggestion] = []
+    # 1) 불펜 매치업
+    if hi_leverage and (q.pitcher == "R" and q.batter == "L"):
+        suggestions.append(LeverageSuggestion(
+            move="Bring LHP (matchup)",
+            rationale="Late-inning, platoon edge vs L batter",
+            impact_hint=round(0.12 + handed_bonus + leverage_idx*0.2, 3)
+        ))
+    elif hi_leverage and (q.pitcher == "L" and q.batter == "R"):
+        suggestions.append(LeverageSuggestion(
+            move="Bring RHP (matchup)",
+            rationale="Late-inning, platoon edge vs R batter",
+            impact_hint=round(0.12 + handed_bonus + leverage_idx*0.2, 3)
+        ))
+    # 2) 대주자/도루
+    if q.base in ("1B","1B2B") and q.outs in (0,1) and abs(q.score_diff) <= 1:
+        suggestions.append(LeverageSuggestion(
+            move="PR/Steal attempt",
+            rationale="Runner on 1B, leverage for SB/PR can raise run expectancy",
+            impact_hint=round(0.06 + leverage_idx*0.15, 3)
+        ))
+    # 3) 수비 시프트/번트 방지
+    if q.base in ("2B","2B3B","1B3B","123") and q.outs == 0 and q.score_diff < 0:
+        suggestions.append(LeverageSuggestion(
+            move="No-bunt defense",
+            rationale="Tie/behind with RISP and 0 out — reduce sac bunt value",
+            impact_hint=round(0.05 + leverage_idx*0.1, 3)
+        ))
+    # 4) 대타 카드
+    if q.outs == 2 and abs(q.score_diff) <= 2:
+        suggestions.append(LeverageSuggestion(
+            move="Pinch hitter (power)",
+            rationale="Two outs, marginal leverage — maximize XBH/HR odds",
+            impact_hint=round(0.04 + leverage_idx*0.12, 3)
+        ))
+
+    if not suggestions:
+        suggestions.append(LeverageSuggestion(
+            move="Status quo",
+            rationale="Low leverage or neutral context — avoid over-managing",
+            impact_hint=0.0
+        ))
+
+    return LeverageResponse(
+        ctx={"inning": str(q.inning), "score_diff": str(q.score_diff),
+             "outs": str(q.outs), "base": q.base, "matchup": f"{q.batter or '-'} vs {q.pitcher or '-'}",
+             "leverage_idx": str(leverage_idx)},
+        suggestions=suggestions
+    )
+
+# ===== #32 심판 EUZ 편향(스텁) =====
+class UmpBiasResponse(BaseModel):
+    ump: str
+    zone_expand_pct: float   # 스트라이크 존 확장 비율(+면 넓음)
+    low_strike_bias: float   # 낮은 코스 스트 주기(+면 낮은쪽 후함)
+    edge_call_volatility: float  # 코너 콜 변동성(0~1)
+
+@router.get("/ump/euz_bias", response_model=UmpBiasResponse)
+async def euz_bias(ump: str):
+    # 이름 해시로 안정 난수
+    seed = _seed_from_str(ump)
+    zexp = 0.02 + (seed % 7) * 0.005         # 2% ~ 5.5%
+    lowb = -0.01 + (seed % 9) * 0.004        # -1% ~ +3.2%
+    vol  = ((seed % 11) / 10.0) * 0.6 + 0.2  # 0.2 ~ 0.8
+    return UmpBiasResponse(
+        ump=ump,
+        zone_expand_pct=round(zexp, 3),
+        low_strike_bias=round(lowb, 3),
+        edge_call_volatility=round(vol, 3),
+    )
+
+# ========= Day11: #34 원정 피로 / #30 라인업 최적화 =========
+from pydantic import BaseModel
+from typing import List, Dict, Optional
+
+# ===== #34 원정 피로(여행/연전 스텁) =====
+class FatigueResponse(BaseModel):
+    team: str
+    date: str
+    fatigue_index: float  # 0~100
+    components: Dict[str, float]
+
+@router.get("/travel/fatigue_index", response_model=FatigueResponse)
+async def travel_fatigue_index(team: str, date: str):
+    # team+date 기반 안정 난수
+    seed = _seed_from(team, sum(ord(c) for c in (date or "")))
+    rA = _stable_rng01(seed + 101)  # 이동거리/시차
+    rB = _stable_rng01(seed + 211)  # 연전 길이
+    rC = _stable_rng01(seed + 307)  # 휴식일 부족
+    travel = round(35.0 * rA, 1)
+    b2b    = round(40.0 * (rB**1.2), 1)
+    rest   = round(30.0 * (rC**1.1), 1)
+    idx = round(_clamp(travel + b2b + rest, 0.0, 100.0), 1)
+    return FatigueResponse(
+        team=team, date=date, fatigue_index=idx,
+        components={"travel":travel, "back_to_back":b2b, "rest_deficit":rest}
+    )
+
+# ===== #30 라인업 최적화(기초) =====
+class LineupPlayer(BaseModel):
+    id: str
+    pos: str
+    woba: float
+    bats: Optional[str] = None  # "L"|"R"|"S"
+
+class LineupQuery(BaseModel):
+    players: List[LineupPlayer]   # 최소 9명 기대(부족하면 채워서 반환)
+    vs_pitcher: Optional[str] = None  # 상대 선발 "L"|"R"
+    prefer_speed_top: bool = True
+
+class LineupResponse(BaseModel):
+    batting_order: List[str]          # 1~9 타순 id
+    expected_runs_stub: float
+    notes: List[str]
+
+def _lineup_score_slot(woba: float, slot: int, speed_hint: float=0.0) -> float:
+    # 단순 가중: 2~4번 상향, 9번 하향
+    slot_weights = [0.92, 1.02, 1.08, 1.06, 1.00, 0.98, 0.96, 0.95, 0.90]
+    w = slot_weights[min(max(slot-1,0),8)]
+    return woba * w + 0.02*speed_hint
+
+def _speed_hint(p: LineupPlayer) -> float:
+    # 빠른 포지션 가점(스텁)
+    return 1.0 if p.pos in ("CF","SS","2B","LF","RF") else 0.3 if p.pos in ("3B","1B") else 0.5
+
+@router.post("/lineup/optimize", response_model=LineupResponse)
+async def lineup_optimize(q: LineupQuery):
+    # 1) 기본 정렬: wOBA 내림차순
+    ps = list(q.players)
+    ps.sort(key=lambda x: x.woba, reverse=True)
+
+    # 2) 좌/우 매치업 미세 보정 (상대 선발 대비)
+    if q.vs_pitcher in ("L","R"):
+        for p in ps:
+            if p.bats == "S": 
+                continue
+            if p.bats == "L" and q.vs_pitcher == "R":
+                p.woba *= 1.02
+            elif p.bats == "R" and q.vs_pitcher == "L":
+                p.woba *= 1.02
+            else:
+                p.woba *= 0.99
+
+    # 3) 1~4번에 상위 타자 배치, 1번은 출루/스피드 가점
+    ps.sort(key=lambda x: x.woba, reverse=True)
+    speed_sorted = sorted(ps[:5], key=lambda x: (_speed_hint(x), x.woba), reverse=True)
+    if q.prefer_speed_top and speed_sorted:
+        lead = speed_sorted[0]
+        ps.remove(lead)
+        order = [lead] + ps
+    else:
+        order = ps
+
+    # 4) 정확히 9명만 사용(부족하면 끝에서 순환)
+    if len(order) < 9:
+        k = 9 - len(order)
+        order += order[:k]
+    order = order[:9]
+
+    # 5) 기대 득점 스텁 계산(슬롯 가중)
+    exp = 0.0
+    for i, p in enumerate(order, start=1):
+        exp += _lineup_score_slot(p.woba, i, _speed_hint(p))
+    exp = round(4.0 + (exp - 9 * 0.33), 2)  # 대충 4점대 중심으로
+
+    return LineupResponse(
+        batting_order=[p.id for p in order],
+        expected_runs_stub=float(max(2.0, exp)),
+        notes=["heuristic_woba_order","matchup_adjusted" if q.vs_pitcher else "neutral"]
+    )
+
+# ========= Day12: #36 뉴스 통합 요약(스텁) / #37 전날 경기 리포트(스텁) =========
+from pydantic import BaseModel
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta
+
+# 공통 유틸: 짧은 안정 난수 요약 생성
+def _stub_summaries(seed: int, n: int, prefix: str) -> List[str]:
+    outs = []
+    for i in range(n):
+        v = _stable_rng01(seed + i*101)
+        tag = "INJ" if v < 0.18 else "TRADE" if v < 0.34 else "PERF" if v < 0.66 else "MINORS"
+        outs.append(f"[{tag}] {prefix} — stub-{int(v*1000)}")
+    return outs
+
+# ===== #36 뉴스 통합 요약 =====
+class NewsDigestResponse(BaseModel):
+    team: str
+    date: str
+    items: List[str]
+
+@router.get("/intel/news_digest", response_model=NewsDigestResponse)
+async def news_digest(team: str, date: str):
+    # team+date로 시드
+    seed = _seed_from_str(team) + sum(ord(c) for c in date)
+    d = datetime.strptime(date, "%Y-%m-%d").date()
+    items = _stub_summaries(seed, 6, f"{team} daily digest")
+    return NewsDigestResponse(team=team, date=d.isoformat(), items=items)
+
+# ===== #37 전날 경기 리포트 =====
+class GameLine(BaseModel):
+    opp: str
+    result: str       # "W 5-3" 같은 형식
+    key_players: List[str]
+    notes: List[str]
+
+class YesterdayReportResponse(BaseModel):
+    team: str
+    date: str
+    games: List[GameLine]
+
+@router.get("/reports/yesterday_games", response_model=YesterdayReportResponse)
+async def yesterday_games(team: str, date: str):
+    # 입력된 date의 "전날"을 가정
+    d = datetime.strptime(date, "%Y-%m-%d").date()
+    y = d - timedelta(days=1)
+    seed = _seed_from_str(team) + y.toordinal()
+    # 스텁 결과 생성
+    v = _stable_rng01(seed)
+    scored = int(3 + round(5*v))
+    allowed = int(2 + round(4*(1.0-v)))
+    res = "W" if scored > allowed else "L" if scored < allowed else "T"
+    line = GameLine(
+        opp="RIV",
+        result=f"{res} {scored}-{allowed}",
+        key_players=[f"BAT-{int(v*9)}", f"PIT-{int((1.0-v)*9)}"],
+        notes=_stub_summaries(seed+999, 3, "game note")
+    )
+    return YesterdayReportResponse(team=team, date=y.isoformat(), games=[line])
+
+# ========= Day13: #38 주간 운영 브리핑 / #40 증거 테이블 =========
+from pydantic import BaseModel
+from typing import List, Dict, Optional
+from datetime import datetime
+
+# ----- #38 주간 운영 브리핑(템플릿) -----
+class WeeklyOpsQuery(BaseModel):
+    team: str
+    week: str          # ISO week: "2025-W23"
+    highlights: Optional[List[str]] = None
+    injuries: Optional[List[str]] = None
+    transactions: Optional[List[str]] = None
+    notes: Optional[List[str]] = None
+
+class WeeklyOpsResponse(BaseModel):
+    team: str
+    week: str
+    sections: Dict[str, List[str]]
+
+@router.post("/reports/weekly_ops", response_model=WeeklyOpsResponse)
+async def weekly_ops(q: WeeklyOpsQuery):
+    sections = {
+        "Highlights": q.highlights or [f"{q.team} weekly highlight stub-1", f"{q.team} weekly highlight stub-2"],
+        "Injuries": q.injuries or ["DL: none"],
+        "Transactions": q.transactions or ["No major moves"],
+        "Schedule/Outlook": [f"Week {q.week}: travel light, opp strength ~0.52 (stub)"],
+        "Notes": q.notes or ["Auto-generated. Replace with real data hooks."]
+    }
+    return WeeklyOpsResponse(team=q.team, week=q.week, sections=sections)
+
+# ----- #40 증거 테이블(요약 → 표) -----
+class EvidenceItem(BaseModel):
+    k: str
+    v: float
+
+class EvidenceTableQuery(BaseModel):
+    items: List[EvidenceItem]
+
+class EvidenceTableResponse(BaseModel):
+    headers: List[str]
+    rows: List[List[str]]
+    csv: str
+
+@router.post("/reports/evidence_table", response_model=EvidenceTableResponse)
+async def evidence_table(q: EvidenceTableQuery):
+    headers = ["Metric", "Value"]
+    rows = [[it.k, f"{it.v}"] for it in q.items]
+    # 간단 CSV 동시 생성
+    csv = "Metric,Value\n" + "\n".join([f"{r[0]},{r[1]}" for r in rows])
+    return EvidenceTableResponse(headers=headers, rows=rows, csv=csv)
+
+# ========= Day14: #41 대화형 응답 규격 / #52 ID 매핑 =========
+from pydantic import BaseModel
+from typing import List, Dict
+
+# ----- #41 대화형 응답 규격(간단 스펙) -----
+class ChatResponseSpec(BaseModel):
+    required_fields: List[str]
+    examples: Dict[str, Dict[str, str]]
+
+@router.get("/chat/response_spec", response_model=ChatResponseSpec)
+async def chat_response_spec():
+    return ChatResponseSpec(
+        required_fields=["title","summary","evidence","next_actions"],
+        examples={
+            "player-report":{
+                "title":"Player X — trend & fit",
+                "summary":"3-year trend up; platoon LHH fit for SEA.",
+                "evidence":"OPS+=128, EV 92.4, DEF tag.",
+                "next_actions":"Scout follow-up; check hamstring status."
+            },
+            "trade-proposal":{
+                "title":"Deal A↔B (balanced)",
+                "summary":"Delta within $2.4M tolerance.",
+                "evidence":"Adj values: A=$18.1M vs B=$16.5M.",
+                "next_actions":"Add PTBNL or cash $1.5–2.0M."
+            }
+        }
+    )
+
+# ----- #52 ID 매핑/정규화(스텁 규칙) -----
+class IdMapQuery(BaseModel):
+    ids: List[str]   # e.g., ["MLB:123","FG:smith_j","BBR:doejo01"]
+
+class IdMapRow(BaseModel):
+    raw: str
+    person_id: str
+    source: str
+
+class IdMapResponse(BaseModel):
+    mapped: List[IdMapRow]
+
+@router.post("/meta/idmap_status", response_model=IdMapResponse)
+async def idmap_status(q: IdMapQuery):
+    mapped: List[IdMapRow] = []
+    for raw in q.ids:
+        if ":" in raw:
+            src, val = raw.split(":", 1)
+            src = src.upper()
+        else:
+            src, val = "UNK", raw
+        # 간단 정규화 규칙
+        if src == "MLB":
+            pid = f"mlb_{val.zfill(6)}"
+        elif src in ("FG","FANGRAPHS"):
+            pid = "fg_" + val.lower().replace(" ", "_")
+        elif src in ("BBR","BASEBALL-REFERENCE"):
+            pid = "bbr_" + val.lower()
+        else:
+            pid = "ext_" + val.lower().replace(" ", "_")
+        mapped.append(IdMapRow(raw=raw, person_id=pid, source=src))
+    return IdMapResponse(mapped=mapped)
