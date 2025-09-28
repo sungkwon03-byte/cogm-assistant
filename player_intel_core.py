@@ -472,3 +472,122 @@ async def count_tendencies(q: CountTendencyQuery):
     return CountTendencyResponse(player_id=q.player_id, season=q.season,
                                  counts=counts, pitch_types=pitch_types)
 
+
+# ========= Day3: #5 약점맵(구종×코스) / #8 핫·콜드 스틱 / #9 부상 리스크 =========
+from pydantic import BaseModel
+
+# ----- 공용 -----
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return lo if v < lo else hi if v > hi else v
+
+def _zone_grid_keys():
+    # 3x3 구역
+    return [
+        "Up-In","Up-Mid","Up-Out",
+        "Mid-In","Mid","Mid-Out",
+        "Low-In","Low-Mid","Low-Out"
+    ]
+
+# ===== #5 약점 탐색(구종×코스) =====
+class WeaknessMapQuery(BaseModel):
+    player_id: str
+    season: int
+    pitch_types: Optional[List[str]] = None  # None이면 기본 ["FF","SL","CH","CB"]
+
+class WeaknessMapResponse(BaseModel):
+    player_id: str
+    season: int
+    metric: str                       # "xwOBA_like" (0.200~0.450)
+    grid: Dict[str, Dict[str, float]] # {pitch_type: {zone: value}}
+
+def _seed_from(pid: str, season: int) -> int:
+    return sum(ord(c) for c in f"{pid}{season}")
+
+def _xwoba_like(seed: int, bias: float) -> float:
+    # 0.200~0.450 사이 값. bias(0~1)를 조금 반영.
+    base = 0.200 + ((seed % 251) / 250.0) * 0.25
+    val = base * (0.85 + 0.3 * bias)
+    return round(_clamp(val, 0.200, 0.450), 3)
+
+@router.post("/player/weakness_map", response_model=WeaknessMapResponse)
+async def weakness_map(q: WeaknessMapQuery):
+    ptypes = q.pitch_types or ["FF","SL","CH","CB"]
+    zones = _zone_grid_keys()
+    # 플레이어 현재 성능을 약간 반영 (OPS 높으면 전체가 약간 낮아짐=약점 덜함)
+    base = league_baseline_for(q.season, None)
+    st = build_player_stats(q.player_id, q.season, base)
+    ops_bias = _clamp(1.0 - (st.batting["OPS"] - base.lg_OPS) / 0.3, 0.0, 1.0)
+    seed = _seed_from(q.player_id, q.season)
+    grid: Dict[str, Dict[str, float]] = {}
+    for i,pt in enumerate(ptypes):
+        pt_seed = seed + (i+1)*17
+        row: Dict[str, float] = {}
+        for j,zone in enumerate(zones):
+            z_bias = (j+1)/len(zones) * 0.6 + 0.4*ops_bias
+            row[zone] = _xwoba_like(pt_seed + j*13, z_bias)
+        grid[pt] = row
+    return WeaknessMapResponse(player_id=q.player_id, season=q.season, metric="xwOBA_like", grid=grid)
+
+# ===== #8 핫/콜드 스틱 검증(안정화) =====
+class HotColdQuery(BaseModel):
+    player_id: str
+    season: int
+
+class HotColdResponse(BaseModel):
+    player_id: str
+    season: int
+    status: str            # "hot" | "neutral" | "cold"
+    z_ops: float           # 리그대비 OPS z-score 근사치
+    stability_score: float # 0~100 (표본 대충)
+    notes: List[str]
+
+@router.post("/player/hot_cold_stick", response_model=HotColdResponse)
+async def hot_cold_stick(q: HotColdQuery):
+    base = league_baseline_for(q.season, None)
+    st = build_player_stats(q.player_id, q.season, base)
+    # 분산 근사: 리그 OPS 표준편차 ~0.060 가정
+    z_ops = _clamp((st.batting["OPS"] - base.lg_OPS) / 0.06, -3.0, 3.0)
+    status = "hot" if z_ops >= 0.8 else "cold" if z_ops <= -0.8 else "neutral"
+    # 안정화: 타석 수 대용으로 AB 사용 (AB 300 → 60점, 500→100점 근사)
+    stability = _clamp((st.batting.get("AB", 0.0) / 500.0) * 100.0, 10.0, 100.0)
+    notes = []
+    prof = st.batted_ball_profile or {}
+    if prof.get("hard_pct", 0.0) >= 45.0: notes.append("hard% high")
+    if prof.get("ev_avg", 0.0) >= 92.0: notes.append("EV solid")
+    return HotColdResponse(player_id=q.player_id, season=q.season, status=status,
+                           z_ops=round(float(z_ops),2), stability_score=round(float(stability),1), notes=notes)
+
+# ===== #9 부상 리스크 시그널(기초) =====
+class InjuryRiskQuery(BaseModel):
+    player_id: str
+    season: int
+
+class InjuryRiskResponse(BaseModel):
+    player_id: str
+    season: int
+    risk_score: float      # 0~100
+    factors: Dict[str, float]
+    flags: List[str]
+
+@router.post("/player/injury_risk_signal", response_model=InjuryRiskResponse)
+async def injury_risk_signal(q: InjuryRiskQuery):
+    base = league_baseline_for(q.season, None)
+    st = build_player_stats(q.player_id, q.season, base)
+    innings = st.pitching.get("innings", 0.0) or (st.pitching.get("IPouts", 0.0)/3.0)
+    era = st.pitching.get("ERA", 0.0)
+    # 간단 근사: workload + (저ERA 하드사용) + hard%
+    workload = _clamp((innings/200.0)*60.0, 0.0, 70.0)
+    hard = float((st.batted_ball_profile or {}).get("hard_pct", 0.0))
+    hard_load = _clamp(hard/100.0*20.0, 0.0, 20.0)
+    low_era_bonus = 10.0 if era <= 3.3 and innings >= 150 else 0.0  # 강부하 로테이션 가정
+    risk = _clamp(workload + hard_load + low_era_bonus, 0.0, 100.0)
+    flags = []
+    if innings >= 170: flags.append("workload_high")
+    if hard >= 50: flags.append("hard_contact_high")
+    if era <= 3.3 and innings >= 150: flags.append("low_ERA_heavy_use")
+    return InjuryRiskResponse(player_id=q.player_id, season=q.season, risk_score=round(float(risk),1),
+                              factors={"workload": round(float(workload),1),
+                                       "hard_load": round(float(hard_load),1),
+                                       "low_era_bonus": round(float(low_era_bonus),1)},
+                              flags=flags)
+
