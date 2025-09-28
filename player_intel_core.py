@@ -705,3 +705,198 @@ async def arb_estimate(q: ArbQuery):
         ))
     return ArbResponse(table=out)
 
+
+# ========= Day5: #15 계약 ROI/서플러스, #16 포지션 대체 자원 추천 =========
+from pydantic import BaseModel
+
+def _npv_series(values: List[float], r: float) -> float:
+    return round(sum(v / ((1.0 + r) ** i) for i, v in enumerate(values, start=1)), 2)
+
+# ----- #15 계약 ROI/서플러스 ($/WAR·NPV) -----
+class ContractYear(BaseModel):
+    year: int
+    salary: float      # 연봉(USD)
+    proj_war: float    # 예상 WAR
+
+class ContractROIQuery(BaseModel):
+    contract: List[ContractYear]
+    dollar_per_war: float = 9000000.0   # $/WAR 기본 9M
+    discount_rate: float = 0.08
+
+class ContractROIResponse(BaseModel):
+    table: List[Dict[str, float]]        # [{year, salary, proj_war, value, surplus}]
+    totals: Dict[str, float]             # {salary, value, surplus, npv_salary, npv_value, npv_surplus}
+    roi: float                           # value / salary (총합 기준)
+
+@router.post("/roster/contract_roi", response_model=ContractROIResponse)
+async def contract_roi(q: ContractROIQuery):
+    rows = []
+    v_series, s_series = [], []
+    for cy in q.contract:
+        value = cy.proj_war * q.dollar_per_war
+        surplus = value - cy.salary
+        rows.append({"year": cy.year, "salary": round(cy.salary,2), "proj_war": round(cy.proj_war,2),
+                     "value": round(value,2), "surplus": round(surplus,2)})
+        v_series.append(value); s_series.append(cy.salary)
+    tot_salary = round(sum(s_series), 2)
+    tot_value = round(sum(v_series), 2)
+    tot_surplus = round(tot_value - tot_salary, 2)
+    npv_salary = _npv_series(s_series, q.discount_rate)
+    npv_value  = _npv_series(v_series, q.discount_rate)
+    npv_surplus = round(npv_value - npv_salary, 2)
+    roi = round((tot_value / tot_salary) if tot_salary > 0 else 0.0, 3)
+    return ContractROIResponse(table=rows,
+                               totals={"salary": tot_salary, "value": tot_value, "surplus": tot_surplus,
+                                       "npv_salary": npv_salary, "npv_value": npv_value, "npv_surplus": npv_surplus},
+                               roi=roi)
+
+# ----- #16 포지션 대체 자원 추천 (간단형) -----
+class ReplacementCand(BaseModel):
+    player_id: str
+    pos: str
+    proj_war: float
+    expected_cost: float
+
+class ReplacementQuery(BaseModel):
+    need_pos: str
+    candidates: List[ReplacementCand]
+    min_war: float = 0.5
+    top_n: int = 5
+
+from pydantic import Field
+from pydantic import ConfigDict
+class ReplacementRankRow(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+    player_id: str
+    proj_war: float
+    expected_cost: float
+    war_per_dollar: float = Field(alias="war_per_$")
+    surplus: float
+
+class ReplacementResponse(BaseModel):
+    pos: str
+    ranked: List[ReplacementRankRow]
+
+@router.post("/roster/replacement_suggestions", response_model=ReplacementResponse)
+async def replacement_suggestions(q: ReplacementQuery):
+    out: List[Dict[str, float]] = []
+    for c in q.candidates:
+        if c.pos != q.need_pos:
+            continue
+        if c.proj_war < q.min_war:
+            continue
+        war_per_dollar = (c.proj_war / c.expected_cost) if c.expected_cost > 0 else 0.0
+        surplus = c.proj_war * 9_000_000.0 - c.expected_cost  # 9M/WAR 기본
+        out.append({
+            "player_id": c.player_id,
+            "proj_war": round(c.proj_war, 2),
+            "expected_cost": round(c.expected_cost, 2),
+            "war_per_$": round(war_per_dollar, 8),
+            "surplus": round(surplus, 2),
+        })
+    out.sort(key=lambda x: (x["surplus"], x["war_per_$"]), reverse=True)
+    ranked = [ReplacementRankRow(**row) for row in out[: q.top_n]]
+    return ReplacementResponse(pos=q.need_pos, ranked=ranked)
+
+# ========= Day6: #22 트레이드 밸류 / #23 모의 트레이드 =========
+from pydantic import BaseModel
+
+def _player_trade_value(years: List[Dict[str, float]], dollar_per_war: float, r: float) -> float:
+    # 가치 = Σ(WAR_i * $/WAR / (1+r)^i) - Σ(Salary_i/(1+r)^i)
+    v = 0.0
+    for i, yr in enumerate(years, start=1):
+        v += (float(yr.get("war", 0.0)) * dollar_per_war) / ((1.0 + r) ** i)
+        v -= (float(yr.get("salary", 0.0))) / ((1.0 + r) ** i)
+    return round(v, 2)
+
+class TradeValueInput(BaseModel):
+    player_id: str
+    years: List[Dict[str, float]]   # [{"year":2025,"war":2.5,"salary":6000000}, ...]
+    risk_pct: float = 0.1           # 0.0~0.9
+
+class TradeValueQuery(BaseModel):
+    entries: List[TradeValueInput]
+    dollar_per_war: float = 9_000_000.0
+    discount_rate: float = 0.08
+
+class TradeValueRow(BaseModel):
+    player_id: str
+    raw_value: float
+    adj_value: float
+    drivers: Dict[str, float]
+
+class TradeValueResponse(BaseModel):
+    table: List[TradeValueRow]
+
+@router.post("/transactions/trade_value", response_model=TradeValueResponse)
+async def trade_value(q: TradeValueQuery):
+    out: List[TradeValueRow] = []
+    for e in q.entries:
+        raw = _player_trade_value(e.years, q.dollar_per_war, q.discount_rate)
+        adj = round(raw * (1.0 - _clamp(e.risk_pct, 0.0, 0.9)), 2)
+        out.append(TradeValueRow(
+            player_id=e.player_id, raw_value=raw, adj_value=adj,
+            drivers={"risk_pct": float(e.risk_pct), "dpw": float(q.dollar_per_war)}
+        ))
+    out.sort(key=lambda x: x.adj_value, reverse=True)
+    return TradeValueResponse(table=out)
+
+# ----- #23 모의 트레이드 -----
+class TradeSide(BaseModel):
+    team: str
+    players: List[str]
+
+class MockTradeQuery(BaseModel):
+    sideA: TradeSide
+    sideB: TradeSide
+    values: Dict[str, float]    # {player_id: adj_value}
+    tolerance: float = 3_000_000.0
+
+class MockTradeResponse(BaseModel):
+    ok: bool
+    delta: float
+    sideA_total: float
+    sideB_total: float
+    winner: str
+    note: str
+
+@router.post("/transactions/mock_trade", response_model=MockTradeResponse)
+async def mock_trade(q: MockTradeQuery):
+    a_total = round(sum(q.values.get(pid, 0.0) for pid in q.sideA.players), 2)
+    b_total = round(sum(q.values.get(pid, 0.0) for pid in q.sideB.players), 2)
+    delta = round(abs(a_total - b_total), 2)
+    ok = delta <= q.tolerance
+    winner = q.sideA.team if a_total > b_total else q.sideB.team if b_total > a_total else "even"
+    note = "balanced" if ok else "needs sweetener"
+    return MockTradeResponse(ok=ok, delta=delta, sideA_total=a_total, sideB_total=b_total, winner=winner, note=note)
+
+# ========= Day7: 주간 통합 스모크 =========
+@router.get("/_regression_smoke")
+async def _regression_smoke():
+    errs = []
+    try:
+        await _selfcheck()
+    except Exception as e:
+        errs.append(f"selfcheck:{type(e).__name__}")
+    try:
+        await compare_players2(ComparePlayersQuery(player_ids=["a","b"], season=2025))
+    except Exception as e:
+        errs.append(f"compare:{type(e).__name__}")
+    try:
+        await three_year_trend(Trend3YQuery(player_id="demo123", season_end=2025))
+    except Exception as e:
+        errs.append(f"trend:{type(e).__name__}")
+    try:
+        await count_tendencies(CountTendencyQuery(player_id="demo123", season=2025))
+    except Exception as e:
+        errs.append(f"count:{type(e).__name__}")
+    try:
+        await replacement_suggestions(ReplacementQuery(
+            need_pos="1B",
+            candidates=[ReplacementCand(player_id="A",pos="1B",proj_war=1.2,expected_cost=2_000_000)],
+            top_n=1
+        ))
+    except Exception as e:
+        errs.append(f"repl:{type(e).__name__}")
+    ok = len(errs) == 0
+    return {"ok": ok, "errors": errs}

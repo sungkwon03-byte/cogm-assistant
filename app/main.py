@@ -415,3 +415,75 @@ try:
         return {"attached": _COGM_ATTACHED, "error": (None if _COGM_ATTACHED else _COGM_ATTACH_ERR)}
 except Exception:
     pass
+
+# === Co-GM reattach endpoint (임시) ===
+try:
+    from player_intel_core import reattach_player_intel as _reattach_pi
+    @app.post("/_reattach_player_intel")
+    def _reattach_player_intel():
+        try:
+            added = _reattach_pi(app)
+            return {"ok": True, "added": added}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+except Exception:
+    pass
+
+# === Co-GM: router 디버그/재부착 진단 (append-only) ===
+try:
+    import importlib, types, pathlib, hashlib, time, json
+    from typing import Any
+    from fastapi import Request
+
+    @app.get("/_routes_verbose")
+    def _routes_verbose():
+        out = []
+        for r in app.router.routes:
+            path = getattr(r, "path", None) or getattr(r, "path_format", str(r))
+            methods = sorted(list(getattr(r, "methods", set())))
+            name = getattr(r, "name", "")
+            out.append({"path": path, "methods": methods, "name": name})
+        return {"count": len(out), "routes": out}
+
+    @app.get("/_pycore_state")
+    def _pycore_state():
+        # player_intel_core 모듈 상태/파일 해시/라우터 존재 여부
+        info: dict[str, Any] = {}
+        p = pathlib.Path("player_intel_core.py")
+        info["player_intel_core_py_exists"] = p.exists()
+        if p.exists():
+            info["mtime"] = p.stat().st_mtime
+            info["sha1"] = hashlib.sha1(p.read_bytes()).hexdigest()
+        try:
+            import player_intel_core as pic
+            info["module_loaded"] = True
+            info["has_router"] = isinstance(getattr(pic, "router", None), types.ModuleType) is False and hasattr(pic, "router")
+            info["dir"] = sorted([x for x in dir(pic) if x.startswith(("attach","re","Replacement","contract","roster","trade"))])
+            # 라우터 내 경로 샘플
+            try:
+                rts = [getattr(rt, "path", str(rt)) for rt in pic.router.routes]
+            except Exception:
+                rts = []
+            info["router_paths_sample"] = rts[:12]
+        except Exception as e:
+            info["module_loaded"] = False
+            info["import_error"] = f"{type(e).__name__}: {e}"
+        return info
+
+    @app.post("/_reattach_player_intel_hard")
+    def _reattach_player_intel_hard():
+        # 모듈 강제 reload 후 include_router 재호출
+        try:
+            import player_intel_core as pic
+        except Exception:
+            return {"ok": False, "error": "import_failed"}
+        try:
+            pic = importlib.reload(pic)
+            added_before = len([getattr(r, "path", "") for r in app.router.routes if str(getattr(r,"path","")).startswith("/")])
+            app.include_router(pic.router)
+            added_after = len([getattr(r, "path", "") for r in app.router.routes if str(getattr(r,"path","")).startswith("/")])
+            return {"ok": True, "added": max(0, added_after - added_before)}
+        except Exception as e:
+            return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+except Exception:
+    pass
