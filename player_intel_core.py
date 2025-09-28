@@ -591,3 +591,117 @@ async def injury_risk_signal(q: InjuryRiskQuery):
                                        "low_era_bonus": round(float(low_era_bonus),1)},
                               flags=flags)
 
+
+# ========= Day4: Roster & Payroll v1 — #13 멀티-이어 페이롤 / #14 ARB 예상 =========
+from pydantic import BaseModel
+from math import pow
+
+# ----- 공용 -----
+def _npv(cashflows: List[float], discount_rate: float = 0.08) -> float:
+    # 연 단위 NPV (연 8% 기본)
+    return round(sum(cf / pow(1.0 + discount_rate, i) for i, cf in enumerate(cashflows, start=1)), 2)
+
+def _salary_growth(base: float, rate: float, years: int) -> List[float]:
+    # 단순 연복리 성장
+    out = []
+    sal = base
+    for _ in range(years):
+        out.append(round(sal, 2))
+        sal *= (1.0 + rate)
+    return out
+
+# ===== #13 멀티-이어 페이롤 시뮬 =====
+class MultiYearPayrollItem(BaseModel):
+    player_id: str
+    base_year_salary: float    # 시작 연도 연봉(USD)
+    growth_rate: float = 0.05  # 연 성장률(기본 5%)
+    years: int = 3             # 시뮬 연수
+    arb_eligible: bool = False # ARB 대상이면, 별도 ARB 시나리오 적용 가능
+
+class MultiYearPayrollQuery(BaseModel):
+    season_start: int
+    items: List[MultiYearPayrollItem]
+    discount_rate: float = 0.08
+
+class MultiYearPayrollResponse(BaseModel):
+    season_years: List[int]
+    table: List[Dict[str, Any]]   # [{player_id, yearly:[...], total, npv}]
+    totals_by_year: List[float]
+    grand_total: float
+    grand_npv: float
+
+@router.post("/roster/multi_year_payroll", response_model=MultiYearPayrollResponse)
+async def multi_year_payroll(q: MultiYearPayrollQuery):
+    max_years = max((it.years for it in q.items), default=0)
+    years = [q.season_start + i for i in range(max_years)]
+    table = []
+    totals = [0.0 for _ in years]
+
+    for it in q.items:
+        yearly = _salary_growth(it.base_year_salary, it.growth_rate, it.years)
+        # 자리채움(표 길이 정렬)
+        yearly += [0.0] * (max_years - len(yearly))
+        for i, v in enumerate(yearly):
+            totals[i] += v
+        total = round(sum(yearly), 2)
+        npv = _npv([v for v in yearly if v > 0], q.discount_rate)
+        table.append({"player_id": it.player_id, "yearly": yearly, "total": total, "npv": npv})
+
+    grand_total = round(sum(totals), 2)
+    grand_npv = _npv([v for v in totals if v > 0], q.discount_rate)
+    return MultiYearPayrollResponse(season_years=years, table=table, totals_by_year=[round(t,2) for t in totals],
+                                    grand_total=grand_total, grand_npv=grand_npv)
+
+# ===== #14 ARB 예상(기초) =====
+# 매우 단순한 기초 모델: 서비스 타임/직전 성과(OPS+/ERA+)에 비례한 가중치를 사용
+class ArbInput(BaseModel):
+    player_id: str
+    role: str                 # "batter" | "pitcher"
+    last_season: int
+    service_years: float      # 예: 3.1 (3년 1개월) → 3.08년 등으로 받기
+    baseline_salary: float    # 직전 시즌 보장/합의 급여(USD)
+
+class ArbQuery(BaseModel):
+    entries: List[ArbInput]
+
+class ArbEstRow(BaseModel):
+    player_id: str
+    role: str
+    last_season: int
+    est_raise_pct: float
+    est_salary: float
+    drivers: Dict[str, float]
+
+class ArbResponse(BaseModel):
+    table: List[ArbEstRow]
+
+@router.post("/roster/arb_estimate", response_model=ArbResponse)
+async def arb_estimate(q: ArbQuery):
+    out = []
+    for e in q.entries:
+        base = league_baseline_for(e.last_season, None)
+        st = build_player_stats(e.player_id, e.last_season, base)
+
+        if e.role == "batter":
+            perf = st.advanced.get("OPS_plus", 100.0)
+            driver_perf = (perf - 100.0) / 100.0   # 100 기준 ±
+        else:
+            perf = st.advanced.get("ERA_plus", 100.0)
+            driver_perf = (perf - 100.0) / 120.0  # 피처는 민감도 완화
+
+        # 서비스타임 가중치: 3~6년 구간에서 점증(최대치 1.0)
+        svc = _clamp((e.service_years - 3.0) / 3.0, 0.0, 1.0)
+
+        # 기본 인상률: 10% + 성과 기여(최대 ±20%) + 서비스 가중(최대 +15%)
+        raise_pct = 0.10 + _clamp(driver_perf, -0.20, 0.20) + 0.15 * svc
+        raise_pct = _clamp(raise_pct, -0.10, 0.50)  # 하한 -10%, 상한 +50%
+
+        est_salary = round(e.baseline_salary * (1.0 + raise_pct), 2)
+        out.append(ArbEstRow(
+            player_id=e.player_id, role=e.role, last_season=e.last_season,
+            est_raise_pct=round(raise_pct*100.0, 1),
+            est_salary=est_salary,
+            drivers={"perf_metric": float(perf), "svc_years": float(e.service_years)}
+        ))
+    return ArbResponse(table=out)
+
