@@ -316,3 +316,159 @@ async def _selfcheck():
 
 def attach_player_intel(app: FastAPI):
     app.include_router(router)
+
+# ========= Day2: compare(2–3), 3-year trend, count tendencies =========
+from pydantic import BaseModel
+from statistics import mean
+
+# ----- 공용 유틸 -----
+def _norm_0_100(val: float, lo: float, hi: float) -> float:
+    if hi <= lo:
+        return 0.0
+    x = (val - lo) / (hi - lo) * 100.0
+    if x < 0: x = 0.0
+    if x > 100: x = 100.0
+    return round(x, 1)
+
+# ----- #2 2–3인 비교 (스파이더/버터플라이) -----
+class ComparePlayersQuery(BaseModel):
+    player_ids: List[str]  # 2~3명
+    season: int
+    league_baselines: Optional[LeagueBaselines] = None
+
+class ComparePlayersResponse(BaseModel):
+    season: int
+    axes: List[str]                 # 스파이더 축 이름
+    players: List[Dict[str, Any]]   # [{player_id, raw:{...}, scaled:{...}}]
+
+def _build_spider_axes() -> List[str]:
+    # 간단형 축: OBP, SLG, OPS, OPS+, ERA, ERA+
+    return ["OBP", "SLG", "OPS", "OPS_plus", "ERA", "ERA_plus"]
+
+@router.post("/player/compare_players2", response_model=ComparePlayersResponse)
+async def compare_players2(q: ComparePlayersQuery):
+    assert 2 <= len(q.player_ids) <= 3, "player_ids는 2~3명이어야 합니다."
+    baselines = league_baseline_for(q.season, q.league_baselines)
+    axes = _build_spider_axes()
+
+    rows = []
+    for pid in q.player_ids:
+        st = build_player_stats(pid, q.season, baselines)
+        raw = {
+            "OBP": st.batting["OBP"],
+            "SLG": st.batting["SLG"],
+            "OPS": st.batting["OPS"],
+            "OPS_plus": st.advanced["OPS_plus"],
+            "ERA": st.pitching["ERA"],
+            "ERA_plus": st.advanced["ERA_plus"],
+        }
+        rows.append({"player_id": pid, "raw": raw})
+
+    # 스케일: 타자축은 높을수록 좋음, ERA는 낮을수록 좋음
+    # 범위는 리그 기준 + 샘플 분포를 섞어서 완만하게
+    obp_lo, obp_hi = baselines.lg_OBP*0.8, baselines.lg_OBP*1.25
+    slg_lo, slg_hi = baselines.lg_SLG*0.8, baselines.lg_SLG*1.25
+    ops_lo, ops_hi = baselines.lg_OPS*0.8, baselines.lg_OPS*1.25
+    opsp_lo, opsp_hi = 50.0, 175.0
+    era_lo, era_hi = max(1.5, baselines.lg_ERA*0.5), baselines.lg_ERA*1.8
+    erap_lo, erap_hi = 50.0, 200.0
+
+    for r in rows:
+        raw = r["raw"]
+        scaled = {
+            "OBP": _norm_0_100(raw["OBP"], obp_lo, obp_hi),
+            "SLG": _norm_0_100(raw["SLG"], slg_lo, slg_hi),
+            "OPS": _norm_0_100(raw["OPS"], ops_lo, ops_hi),
+            "OPS_plus": _norm_0_100(raw["OPS_plus"], opsp_lo, opsp_hi),
+            # ERA는 낮을수록 좋음 → 역스케일
+            "ERA": 100.0 - _norm_0_100(raw["ERA"], era_lo, era_hi),
+            "ERA_plus": _norm_0_100(raw["ERA_plus"], erap_lo, erap_hi),
+        }
+        r["scaled"] = {k: round(v,1) for k,v in scaled.items()}
+
+    return ComparePlayersResponse(season=q.season, axes=axes, players=rows)
+
+# ----- #3 3년 트렌드 (wRC+, BABIP, EV, BB/K) -----
+class Trend3YQuery(BaseModel):
+    player_id: str
+    season_end: int   # 이 해를 끝으로 직전 2시즌 포함 (예: 2025 → 2023,2024,2025)
+    league_baselines: Optional[LeagueBaselines] = None
+
+class Trend3YResponse(BaseModel):
+    player_id: str
+    seasons: List[int]
+    series: Dict[str, List[float]]  # {"wRC_plus":[..], "BABIP":[..], "EV":[..], "BBK":[..]}
+
+# 간단 추정치(스텁): 실제 ETL 구간 연결 전까지 사용
+def _fake_wrc_plus(st: PlayerStatsResponse, base: LeagueBaselines) -> float:
+    # 단순형: OPS+에 소량 보정
+    return round(st.advanced["OPS_plus"] * 0.95 + 5, 1)
+
+def _fake_babip(st: PlayerStatsResponse) -> float:
+    # 극단치 방지용 단순 추정(안타-홈런)/타수가 최소식과 다르지만 임시
+    h = st.batting["H"]; hr = st.batting["HR"]; ab = st.batting["AB"]
+    sf = st.batting["SF"]; bb = st.batting["BB"]; hbp = st.batting["HBP"]
+    # 최소 안전장치
+    balls_in_play = max(1.0, ab - hr - (bb + hbp + sf)*0.0)
+    return round((max(0.0, h-hr)) / balls_in_play, 3)
+
+def _fake_ev(st: PlayerStatsResponse) -> float:
+    # Day1 batted_ball_profile의 평균 EV 사용(없을 경우 90.0)
+    prof = st.batted_ball_profile or {}
+    return float(prof.get("ev_avg", 90.0))
+
+def _fake_bbk(st: PlayerStatsResponse) -> float:
+    bb = st.batting["BB"]; k = max(1.0, 120.0)  # K 스텁(임시): 추후 실제 값 연결
+    return round(bb / k, 3)
+
+@router.post("/player/three_year_trend", response_model=Trend3YResponse)
+async def three_year_trend(q: Trend3YQuery):
+    years = [q.season_end-2, q.season_end-1, q.season_end]
+    base = league_baseline_for(q.season_end, q.league_baselines)
+    wr, bab, evv, bbk = [], [], [], []
+    for y in years:
+        st = build_player_stats(q.player_id, y, base)
+        # (스텁) 시즌별 차이를 내기 위해 약한 변형 적용
+        # 실제 연결 시 fetch_ 계열에서 연도별 데이터 반환으로 교체
+        st.batted_ball_profile = st.batted_ball_profile or {"ev_avg": 92.0 + (y-years[0])*1.2}
+        wr.append(_fake_wrc_plus(st, base))
+        bab.append(_fake_babip(st))
+        evv.append(_fake_ev(st))
+        bbk.append(_fake_bbk(st))
+    return Trend3YResponse(player_id=q.player_id, seasons=years,
+                           series={"wRC_plus": wr, "BABIP": bab, "EV": evv, "BBK": bbk})
+
+# ----- #4 카운트/투수유형별 성향(기초 분포) -----
+class CountTendencyQuery(BaseModel):
+    player_id: str
+    season: int
+    sample: Optional[int] = 200
+
+class CountTendencyResponse(BaseModel):
+    player_id: str
+    season: int
+    counts: Dict[str, Dict[str, float]]  # {"0-0":{"swing%":..,"whiff%":..,"inplay%":..}, ...}
+    pitch_types: Dict[str, Dict[str, float]]  # {"FF":{"swing%":..,"whiff%":..}, ...}
+
+@router.post("/player/count_tendencies", response_model=CountTendencyResponse)
+async def count_tendencies(q: CountTendencyQuery):
+    # 스텁 분포(균형 감각만): 실제 연결 시 pitch-by-pitch DB로 대체
+    counts = {
+        "0-0": {"swing%": 30.0, "whiff%": 8.0, "inplay%": 18.0},
+        "1-0": {"swing%": 28.0, "whiff%": 7.0, "inplay%": 16.0},
+        "0-1": {"swing%": 45.0, "whiff%": 14.0, "inplay%": 20.0},
+        "1-1": {"swing%": 40.0, "whiff%": 12.0, "inplay%": 19.0},
+        "2-1": {"swing%": 48.0, "whiff%": 13.0, "inplay%": 22.0},
+        "1-2": {"swing%": 56.0, "whiff%": 24.0, "inplay%": 17.0},
+        "3-2": {"swing%": 62.0, "whiff%": 26.0, "inplay%": 21.0},
+    }
+    pitch_types = {
+        "FF": {"swing%": 44.0, "whiff%": 10.0},
+        "SL": {"swing%": 39.0, "whiff%": 16.0},
+        "CH": {"swing%": 36.0, "whiff%": 15.0},
+        "CB": {"swing%": 33.0, "whiff%": 14.0},
+        "SI": {"swing%": 41.0, "whiff%": 11.0},
+    }
+    return CountTendencyResponse(player_id=q.player_id, season=q.season,
+                                 counts=counts, pitch_types=pitch_types)
+
