@@ -8,3 +8,4 @@ logs/
 *.log.gz
 __pycache__/
 *.tar.gz
+cogm-assistant/
