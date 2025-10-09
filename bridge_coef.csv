@@ -1,0 +1,9 @@
+group,metric,n,a,b
+KBO_bat,hr_pa,0,,
+KBO_bat,bb_pct,0,,
+KBO_bat,so_pct,0,,
+KBO_bat,h_pa,0,,
+KBO_bat,ops_proxy,0,,
+KBO_pit,era,675,1.0,0.0
+KBO_pit,k9,675,0.0,0.0
+KBO_pit,bb9,675,0.0,0.0

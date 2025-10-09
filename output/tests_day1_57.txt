@@ -1,0 +1,19 @@
+[START] Smoke Tests Day1–57 @ 2025-10-05T07:09:57.569449+00:00
+[OK] 존재/비어있지 않음: output/player_cards.csv
+[OK] 존재/비어있지 않음: output/player_cards_schema.json
+[OK] 존재/비어있지 않음: output/team_agg.csv
+[OK] 존재/비어있지 않음: output/verify_report.txt
+[OK] logs 디렉토리 존재
+[OK] player_cards 행수 > 0
+[OK] league 값 허용세트: ['MiLB']
+[OK] PK 유니크 통과
+[OK] 핵심 컬럼 모두 존재
+[WARN] 핵심 컬럼 null 존재: {'player_uid': 0, 'season': 0, 'league': 0, 'team_id': 0, 'name_full': 0, 'age': 1400, 'pa_or_bf': 265, 'war': 1400}
+[OK] team_agg 행수 > 0
+[OK] team_agg 필수 컬럼 존재
+[OK] team_agg league 값 허용세트
+[OK] team_agg 키 유니크 통과
+[OK] verify_report 완료 문구
+[OK] logs 파일 개수: 61
+[SUMMARY] PASS=15, WARN=1, FAIL=0
+[END] Smoke Tests status=PASS

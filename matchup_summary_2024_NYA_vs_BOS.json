@@ -1,0 +1,32 @@
+{
+  "year": 2024,
+  "teamA": {
+    "teamID": "NYA",
+    "name": "New York Yankees"
+  },
+  "teamB": {
+    "teamID": "BOS",
+    "name": "Boston Red Sox"
+  },
+  "home": "B",
+  "league_rs_per_g": 4.393371757925072,
+  "mu": {
+    "A": 4.816417112307202,
+    "B": 4.512131193025788
+  },
+  "winA": 0.53336,
+  "winB": 0.46664,
+  "exp_runs_A": 4.87572,
+  "exp_runs_B": 4.59764,
+  "qA": {
+    "p10": 2.0,
+    "p50": 5.0,
+    "p90": 8.0
+  },
+  "qB": {
+    "p10": 2.0,
+    "p50": 4.0,
+    "p90": 7.0
+  },
+  "nsims": 50000
+}

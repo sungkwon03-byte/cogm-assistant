@@ -1,0 +1,46 @@
+{
+  "KBO_bat": {
+    "hr_pa": {
+      "a": null,
+      "b": null,
+      "n": 0
+    },
+    "bb_pct": {
+      "a": null,
+      "b": null,
+      "n": 0
+    },
+    "so_pct": {
+      "a": null,
+      "b": null,
+      "n": 0
+    },
+    "h_pa": {
+      "a": null,
+      "b": null,
+      "n": 0
+    },
+    "ops_proxy": {
+      "a": null,
+      "b": null,
+      "n": 0
+    }
+  },
+  "KBO_pit": {
+    "era": {
+      "a": 1.0,
+      "b": 0.0,
+      "n": 675
+    },
+    "k9": {
+      "a": 0.0,
+      "b": 0.0,
+      "n": 675
+    },
+    "bb9": {
+      "a": 0.0,
+      "b": 0.0,
+      "n": 675
+    }
+  }
+}

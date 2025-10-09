@@ -1,0 +1,5 @@
+{
+  "people_search": "https://statsapi.mlb.com/api/v1/people",
+  "people_stats_season": "https://statsapi.mlb.com/api/v1/people/{id}/stats?group={group}&stats=season&season={season}&gameType=R",
+  "people_stats_career": "https://statsapi.mlb.com/api/v1/people/{id}/stats?group={group}&stats=career&gameType=R"
+}

@@ -1,0 +1,24 @@
+{
+  "kbo_batting": {
+    "name_col": "Name",
+    "season_col": "Year",
+    "n_rows": 5
+  },
+  "mlb_bat": {
+    "src": "output/cache/mlb_bat_agg.csv",
+    "season_col": null,
+    "n_rows": 675
+  },
+  "mlb_pit": {
+    "src": "output/cache/mlb_pit_agg.csv",
+    "season_col": null,
+    "n_rows": 675
+  },
+  "id_hits": {
+    "kbo_rows": 5,
+    "mlb_bat_mlb_id_hits": 0,
+    "mlb_pit_mlb_id_hits": 0
+  },
+  "season_overlap_bat_rows": 0,
+  "season_overlap_pit_rows": 0
+}

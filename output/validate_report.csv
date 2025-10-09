@@ -1,0 +1,10 @@
+file,rows,cols_ok
+output/games.csv,1,True
+output/team_box.csv,2,True
+output/player_box.csv,0,True
+output/statcast_hit_agg.csv,2,True
+output/statcast_pit_agg.csv,2,True
+output/splits_merged.csv,1,True
+output/id_map.csv,2,True
+output/bridge_coef.csv,2,True
+output/player_card_xleague.csv,2,True

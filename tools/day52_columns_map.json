@@ -1,0 +1,19 @@
+{
+  "FG": {
+    "Season": "season", "Name": "name", "Team":"team", "Tm":"team",
+    "PA":"PA","AB":"AB","H":"H","HR":"HR","BB%":"BB_pct","K%":"K_pct",
+    "AVG":"AVG","OBP":"OBP","SLG":"SLG","OPS":"OPS","wOBA":"wOBA","wRC+":"wRCplus",
+    "ISO":"ISO","BABIP":"BABIP",
+    "vs L wRC+": "vsL_wRCplus","vs R wRC+": "vsR_wRCplus","vs L OPS":"vsL_OPS","vs R OPS":"vsR_OPS",
+    "vs L wOBA": "vsL_wOBA","vs R wOBA":"vsR_wOBA",
+    "IP":"IP","TBF":"TBF","ERA":"ERA","FIP":"FIP","xFIP":"xFIP"
+  },
+  "BR": {
+    "Season":"season","Name":"name","Team":"team","Tm":"team",
+    "PA":"PA","AB":"AB","H":"H","HR":"HR","BB%":"BB_pct","SO%":"K_pct",
+    "BA":"AVG","OBP":"OBP","SLG":"SLG","OPS":"OPS","wOBA":"wOBA","wRC+":"wRCplus",
+    "ISO":"ISO","BABIP":"BABIP",
+    "OPSvsL":"vsL_OPS","OPSvsR":"vsR_OPS","wOBAvsL":"vsL_wOBA","wOBAvsR":"vsR_wOBA",
+    "IP":"IP","BF":"TBF","ERA":"ERA","FIP":"FIP"
+  }
+}

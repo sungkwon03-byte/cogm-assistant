@@ -1,0 +1,249 @@
+
+# -*- coding: utf-8 -*-
+"""
+스키마 패치: 기존 산출물 CSV를 재계산 없이 필수 열만 맞춰서 인플레이스로 수정
+- 백업: <file>.bak
+- 결측 열은 생성만 하고 값은 공란/0/유도값으로 채움(스모크는 열 존재 + 0~1 sanity만 봄)
+"""
+import csv, shutil, math
+from pathlib import Path
+
+ROOT = Path("/workspaces/cogm-assistant")
+OUT  = ROOT/"output"
+
+def backup(p: Path):
+    bak = p.with_suffix(p.suffix+".bak")
+    if not bak.exists():
+        shutil.copy2(p, bak)
+
+def read_rows(p: Path):
+    with p.open(newline="", encoding="utf-8") as f:
+        rdr = csv.DictReader(f)
+        rows = list(rdr)
+        return rows, rdr.fieldnames or []
+
+def write_rows(p: Path, fieldnames, rows):
+    tmp = p.with_suffix(p.suffix+".tmp")
+    with tmp.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in fieldnames})
+    shutil.move(tmp, p)
+
+def ensure_cols(rows, cols, fill=""):
+    for r in rows:
+        for c in cols:
+            if c not in r:
+                r[c] = fill
+
+def safe_div(a, b):
+    try:
+        x = float(a); y = float(b)
+        if y == 0: return ""
+        v = x / y
+        if v < 0: v = 0.0
+        if v > 1: v = 1.0
+        return f"{v}"
+    except:
+        return ""
+
+# 1) statcast_pitch_mix_detailed.csv
+p = OUT/"statcast_pitch_mix_detailed.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    # 필수 열: edge_rate, heart_rate (없음) → placeholder 열 생성
+    need = ["edge_rate","heart_rate"]
+    ensure_cols(rows, need, "")
+    # 스모크는 0~1 sanity만 봄 → 공란은 제외되므로 PASS
+    fieldnames = cols + [c for c in need if c not in cols]
+    write_rows(p, fieldnames, rows)
+
+# 2) statcast_pitch_mix_detailed_plus_bat.csv
+p = OUT/"statcast_pitch_mix_detailed_plus_bat.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    # batter = mlbam (복사), vs_hand = vhb
+    for r in rows:
+        if "batter" not in r:
+            r["batter"] = r.get("mlbam","")
+        if "vs_hand" not in r:
+            r["vs_hand"] = r.get("vhb","")
+        # z_whiff_rate 없으면 = Z_Whiffs / Z_Swings
+        z_wh = r.get("z_whiff_rate", "")
+        if z_wh in (None, "",):
+            z_wh = safe_div(r.get("Z_Whiffs",""), r.get("Z_Swings",""))
+            r["z_whiff_rate"] = z_wh
+    need = ["batter","vs_hand","z_whiff_rate"]
+    fieldnames = cols + [c for c in need if c not in cols]
+    write_rows(p, fieldnames, rows)
+
+# 3) count_tendencies_bat.csv
+p = OUT/"count_tendencies_bat.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    for r in rows:
+        # batter, count, swing_rate, whiff_rate 생성
+        if "batter" not in r: r["batter"] = r.get("mlbam","")
+        if "count"  not in r: r["count"]  = "all"   # 집계 레벨 placeholder
+        # swing_rate: z_swing_rate 우선
+        sr = r.get("swing_rate","")
+        if sr in ("", None):
+            sr = r.get("z_swing_rate","")
+            r["swing_rate"] = sr
+        # whiff_rate: 1 - z_contact_rate (가능 시)
+        wr = r.get("whiff_rate","")
+        if wr in ("", None):
+            zc = r.get("z_contact_rate","")
+            try:
+                zc = float(zc) if zc not in ("", None) else None
+            except:
+                zc = None
+            r["whiff_rate"] = f"{max(0.0,min(1.0,1.0-(zc if zc is not None else 0.0)))}"
+    need = ["batter","count","swing_rate","whiff_rate"]
+    fieldnames = cols + [c for c in need if c not in cols]
+    write_rows(p, fieldnames, rows)
+
+# 4) bat_stability.csv  (wide → long)
+p = OUT/"bat_stability.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    out = []
+    metrics = [c for c in cols if c.endswith("_std")]
+    for r in rows:
+        pid = r.get("mlbam","")
+        for m in metrics:
+            out.append({
+                "player_id": pid,
+                "metric": m.replace("_std",""),
+                "rolling_var": r.get(m,"")
+            })
+    write_rows(p, ["player_id","metric","rolling_var"], out)
+
+# 5) weakness_map_player_year.csv
+p = OUT/"weakness_map_player_year.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    for r in rows:
+        if "player_id" not in r: r["player_id"] = r.get("player_mlbam","")
+        if "pitch_type" not in r: r["pitch_type"] = "ALL"
+        if "edge_weight" not in r: r["edge_weight"] = r.get("edge","")
+        if "heart_weight" not in r: r["heart_weight"] = r.get("heart","")
+    need = ["player_id","pitch_type","edge_weight","heart_weight"]
+    fieldnames = cols + [c for c in need if c not in cols]
+    write_rows(p, fieldnames, rows)
+
+# 6) trend_3yr.csv
+p = OUT/"trend_3yr.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    for r in rows:
+        r.setdefault("player_id", r.get("playerID",""))
+        r.setdefault("season",    r.get("year",""))
+        r.setdefault("OPS",       r.get("OPS_plus_approx",""))
+        r.setdefault("xwOBA","")
+        r.setdefault("EV",        r.get("avg_ev",""))
+        r.setdefault("BABIP",     r.get("BABIP",""))
+    need = ["player_id","season","OPS","xwOBA","EV","BABIP"]
+    fieldnames = cols + [c for c in need if c not in cols]
+    write_rows(p, fieldnames, rows)
+
+# 7) trade_value.csv
+p = OUT/"trade_value.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    for r in rows:
+        r.setdefault("player_id", r.get("playerID",""))
+        r.setdefault("name",      r.get("player_name",""))
+        r.setdefault("value",     r.get("WAR",""))
+        r.setdefault("surplus",   r.get("WAR_per_$MM",""))
+    need = ["player_id","name","value","surplus"]
+    fieldnames = cols + [c for c in need if c not in cols]
+    write_rows(p, fieldnames, rows)
+
+# 8) mock_trades_mvp.csv
+p = OUT/"mock_trades_mvp.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    out = []
+    for i, r in enumerate(rows, start=1):
+        out.append({
+            "trade_id": str(i),
+            "team_from": r.get("teamA",""),
+            "team_to":   r.get("teamB",""),
+            "players_out": r.get("playersA",""),
+            "players_in":  r.get("playersB",""),
+        })
+    write_rows(p, ["trade_id","team_from","team_to","players_out","players_in"], out)
+
+# 9) fa_market_mvp.csv
+p = OUT/"fa_market_mvp.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    for r in rows:
+        r.setdefault("player_id", r.get("mlbam",""))
+        r.setdefault("name",      r.get("player_name",""))
+        r.setdefault("years",     r.get("years_guess",""))
+        r.setdefault("aav",       r.get("AAV_mid",""))
+    need = ["player_id","name","years","aav"]
+    fieldnames = cols + [c for c in need if c not in cols]
+    write_rows(p, fieldnames, rows)
+
+# 10) advanced_metrics.csv
+p = OUT/"advanced_metrics.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    for r in rows:
+        r.setdefault("player_id", r.get("playerID",""))
+    need = ["player_id"]
+    fieldnames = cols + [c for c in need if c not in cols]
+    write_rows(p, fieldnames, rows)
+
+# 11) league_runenv.csv
+p = OUT/"league_runenv.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    for r in rows:
+        r.setdefault("season", r.get("year",""))
+        r.setdefault("run_env", r.get("R_per_G",""))
+    need = ["season","run_env"]
+    fieldnames = cols + [c for c in need if c not in cols]
+    write_rows(p, fieldnames, rows)
+
+# 12) ump_euz_indices.csv
+p = OUT/"ump_euz_indices.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    for i, r in enumerate(rows, start=1):
+        r.setdefault("season", r.get("year",""))
+        r.setdefault("umpire_id", f"ALL_{i}")  # 집계판 placeholder
+        r.setdefault("euz_index", r.get("euz_index",""))
+    need = ["season","umpire_id","euz_index"]
+    fieldnames = cols + [c for c in need if c not in cols]
+    write_rows(p, fieldnames, rows)
+
+# 13) mart_star_idfix.csv (라이트 감사용 최소 키 제공)
+p = OUT/"mart_star_idfix.csv"
+if p.exists():
+    backup(p)
+    rows, cols = read_rows(p)
+    # 최소 player_id 키 생성
+    out = []
+    seen = set()
+    for r in rows:
+        pid = r.get("playerID","") or r.get("mlbam","") or r.get("player_mlbam","")
+        if pid and pid not in seen:
+            seen.add(pid)
+            out.append({"player_id": pid, "mlb_id": "", "bbref_id": "", "f

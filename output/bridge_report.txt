@@ -1,0 +1,2 @@
+[KBO_bat] pairs=0
+[KBO_pit] pairs=675

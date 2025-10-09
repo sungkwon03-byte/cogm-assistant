@@ -1,0 +1,566 @@
+# -*- coding: utf-8 -*-
+import os, sys, re, json, math, datetime as dt
+import pandas as pd, numpy as np
+from pathlib import Path
+
+ROOT = Path.cwd()
+OUT  = ROOT/"output"; OUT.mkdir(parents=True, exist_ok=True)
+LOGS = ROOT/"logs";   LOGS.mkdir(parents=True, exist_ok=True)
+TEST = ROOT/"tests";  TEST.mkdir(parents=True, exist_ok=True)
+
+def log(*a): print(*a); sys.stdout.flush()
+def nz(s,v=0): return s.fillna(v)
+
+def find_csv(name_like, bases):
+    cands=[]
+    for base in bases:
+        if not base.exists(): continue
+        for p in base.rglob("*.csv"):
+            if re.search(name_like, p.name, re.IGNORECASE):
+                cands.append(p)
+    if not cands: raise FileNotFoundError(f"CSV not found: /{name_like}/ under {bases}")
+    cands = sorted(cands, key=lambda p: (-len(str(p)), p.name))
+    return cands[0]
+
+def find_dir(name_like, bases):
+    cands=[]
+    for base in bases:
+        if not base.exists(): continue
+        for d in base.rglob("*"):
+            if d.is_dir() and re.search(name_like, d.name, re.IGNORECASE):
+                cands.append(d)
+    cands = sorted(cands, key=lambda p: (-len(str(p)), p.name))
+    return cands[0] if cands else None
+
+# ---------- 소스 경로(MLB) ----------
+lahman_base = None
+for b in [ROOT/"data"/"lahman_extracted", ROOT/"data"/"lahman", ROOT/"lahman", ROOT/"data"]:
+    if b.exists():
+        lahman_base = b; break
+if not lahman_base:
+    raise SystemExit("Lahman base not found")
+
+chad_dir  = find_dir(r"chad|chadwick", [ROOT/"data"/"id", ROOT/"data", ROOT])
+retro_dir = find_dir(r"retro|retrosheet", [ROOT/"data", ROOT])
+
+stat_dirs = [d for d in [
+    find_dir(r"statcast_clean", [ROOT/"data", ROOT/"output"/"cache"]),
+    find_dir(r"statcast", [ROOT/"data", ROOT/"output"/"cache"]),
+    ROOT/"output"/"cache"/"statcast"
+] if d and d.exists()]
+# 중복 제거
+stat_dirs = [Path(p) for p in dict.fromkeys(map(str, stat_dirs)).keys()]
+
+log(f"[SRC] Lahman: {lahman_base}")
+log(f"[SRC] Chadwick: {chad_dir or 'N/A'}")
+log(f"[SRC] Retrosheet: {retro_dir or 'N/A'}")
+log(f"[SRC] Statcast dirs: {', '.join(map(str, stat_dirs)) if stat_dirs else 'N/A'}")
+
+# ---------- Lahman 로드 ----------
+def read_head_cols(p, cols):
+    head = pd.read_csv(p, nrows=1)
+    present = head.columns.tolist()
+    use = [c for c in cols if c in present]
+    return pd.read_csv(p, usecols=use, low_memory=False)
+
+bat = read_head_cols(find_csv(r"^Batting\.csv$", [lahman_base]),
+    ["yearID","lgID","teamID","playerID","G","AB","R","H","2B","3B","HR","RBI","BB","HBP","SH","SF","SB","CS","SO"])
+pit = read_head_cols(find_csv(r"^Pitching\.csv$", [lahman_base]),
+    ["yearID","lgID","teamID","playerID","G","GS","W","L","SV","IPouts","H","R","ER","HR","BB","SO"])
+pep = read_head_cols(find_csv(r"^People\.csv$", [lahman_base]),
+    ["playerID","nameFirst","nameLast","bbrefID","birthYear","birthMonth","birthDay"])
+teams = pd.read_csv(find_csv(r"^Teams\.csv$", [lahman_base]), low_memory=False)
+
+mlb = {"AL","NL"}
+bat = bat[bat["lgID"].isin(mlb)].copy()
+pit = pit[pit["lgID"].isin(mlb)].copy()
+teams = teams[teams["lgID"].isin(mlb)].copy()
+
+# ---------- Chadwick(있으면 매핑) ----------
+chad = pd.DataFrame()
+if chad_dir:
+    cand=[]
+    for p in chad_dir.rglob("*.csv"):
+        nm = p.name.lower()
+        if any(k in nm for k in ["register","people","chadwick"]):
+            cand.append(p)
+    if cand:
+        chad_path = sorted(cand, key=lambda p:(-len(str(p)), p.name))[0]
+        try: chad = pd.read_csv(chad_path, low_memory=False)
+        except Exception: chad = pd.read_csv(chad_path, encoding_errors="ignore", low_memory=False)
+        cols_lower = [c.lower() for c in chad.columns]
+        def pick(*names):
+            for n in names:
+                if n in chad.columns: return n
+                if n in cols_lower: return chad.columns[cols_lower.index(n)]
+            return None
+        keep_map = {
+            "bbrefID": pick("key_bbref","bbrefID","bbref_id"),
+            "mlbam":   pick("key_mlbam","mlbam","mlbam_id","key_mlb"),
+            "retroID": pick("key_retro","retroID","retro_id"),
+            "fgID":    pick("key_fangraphs","fg_id","fangraphs"),
+            "nameFirst": pick("name_first","first","nameFirst"),
+            "nameLast":  pick("name_last","last","nameLast"),
+        }
+        chad = chad.rename(columns={v:k for k,v in keep_map.items() if v})
+        chad = chad[[c for c in ["bbrefID","mlbam","retroID","fgID","nameFirst","nameLast"] if c in chad.columns]].drop_duplicates()
+        log(f"[CHAD] rows={len(chad)} cols={list(chad.columns)}")
+    else:
+        log("[CHAD] no csv found")
+
+# ---------- Statcast 집계 ----------
+STAT_MAX_FILES = int(os.environ.get("STATCAST_MAX_FILES", "24"))
+def parse_statcast_file(fp: Path):
+    usecols = ["player_id","batter","pitcher","estimated_woba_using_speedangle","launch_speed","game_year","game_date","events"]
+    head = pd.read_csv(fp, nrows=1)
+    present = head.columns.tolist()
+    cols = [c for c in usecols if c in present]
+    if not cols: return pd.DataFrame()
+    blocks=[]
+    for ch in pd.read_csv(fp, usecols=cols, chunksize=200_000, low_memory=False):
+        if "batter" in ch.columns: ch["mlbam"] = ch["batter"]
+        elif "player_id" in ch.columns: ch["mlbam"] = ch["player_id"]
+        elif "pitcher" in ch.columns: ch["mlbam"] = ch["pitcher"]
+        else: continue
+        if "game_year" in ch.columns: ch["year"] = ch["game_year"]
+        elif "game_date" in ch.columns: ch["year"] = pd.to_datetime(ch["game_date"], errors="coerce").dt.year
+        else: ch["year"] = np.nan
+        ch = ch.dropna(subset=["mlbam","year"])
+        if "estimated_woba_using_speedangle" not in ch.columns:
+            ch["estimated_woba_using_speedangle"] = np.nan
+        if "launch_speed" not in ch.columns:
+            ch["launch_speed"] = np.nan
+        ch["is_bbe"]  = ch["launch_speed"].notna().astype(int)
+        ch["is_hard"] = ((ch["launch_speed"]>=95).astype(int)) * ch["is_bbe"]
+        blocks.append(ch[["mlbam","year","estimated_woba_using_speedangle","launch_speed","is_bbe","is_hard"]])
+    if not blocks: return pd.DataFrame()
+    df = pd.concat(blocks, ignore_index=True)
+    g = df.groupby(["mlbam","year"], as_index=False).agg(
+        xwOBA_mean=("estimated_woba_using_speedangle","mean"),
+        EV_avg=("launch_speed","mean"),
+        BBE=("is_bbe","sum"),
+        Hard=("is_hard","sum")
+    )
+    g["HardHitRate"] = (g["Hard"]/g["BBE"]).replace([np.inf,-np.inf], np.nan)
+    return g
+
+stat_agg=[]
+if stat_dirs:
+    files=[]
+    for d in stat_dirs: files += list(d.rglob("*.csv"))
+    files = sorted(files)[:STAT_MAX_FILES]
+    log(f"[STATCAST] processing {len(files)} files (limit={STAT_MAX_FILES})")
+    for fp in files:
+        try:
+            g = parse_statcast_file(fp)
+            if len(g): stat_agg.append(g)
+        except Exception as e:
+            log(f"[STATCAST][WARN] {fp}: {e}")
+stat_agg = pd.concat(stat_agg, ignore_index=True) if stat_agg else pd.DataFrame(columns=["mlbam","year","xwOBA_mean","EV_avg","BBE","Hard","HardHitRate"])
+stat_agg.to_csv(OUT/"statcast_agg_player_year.csv", index=False)
+log(f"[STATCAST] agg rows={len(stat_agg)} -> output/statcast_agg_player_year.csv")
+
+# ---------- Retrosheet 파크팩터(안전 버전) ----------
+def compute_park_factors(retro_dir: Path):
+    import re
+    if not retro_dir or not retro_dir.exists():
+        return pd.DataFrame(columns=["year","teamID","ParkFactor"])
+    files=[]
+    for fp in retro_dir.rglob("*"):
+        if fp.is_file() and re.match(r"(?i)^gl.*\.(csv|txt)$", fp.name):
+            files.append(fp)
+    if not files:
+        return pd.DataFrame(columns=["year","teamID","ParkFactor"])
+    rows=[]
+    for fp in files[:80]:
+        try:
+            df = pd.read_csv(fp, header=None, low_memory=False)
+            if df.shape[1] >= 11:
+                y = df.iloc[:,3].astype(str).str.slice(0,4)
+                year = pd.to_numeric(y, errors="coerce").mode()
+                year = int(year.iloc[0]) if len(year) else np.nan
+                vis = pd.to_numeric(df.iloc[:,9], errors="coerce")
+                hom = pd.to_numeric(df.iloc[:,10], errors="coerce")
+                ht  = df.iloc[:,7].astype(str).str.upper()
+                at  = df.iloc[:,6].astype(str).str.upper()
+                tmp = pd.DataFrame({"home":ht,"away":at,"Rvis":vis,"Rhom":hom})
+                tmp["year"]=year
+                rows.append(tmp.dropna(subset=["Rvis","Rhom","year"]))
+        except Exception:
+            pass
+    if not rows: return pd.DataFrame(columns=["year","teamID","ParkFactor"])
+    gl = pd.concat(rows, ignore_index=True)
+    home = gl.groupby(["year","home"], as_index=False).agg(R=("Rhom","mean")).rename(columns={"home":"teamID"})
+    away = gl.groupby(["year","away"], as_index=False).agg(R=("Rvis","mean")).rename(columns={"away":"teamID"})
+    m = home.merge(away, on=["year","teamID"], suffixes=("_home","_away"))
+    m["PF_raw"] = (m["R_home"] / m["R_away"]).replace([np.inf,-np.inf], np.nan)
+    m["ParkFactor"] = m["PF_raw"] / m.groupby("year")["PF_raw"].transform("mean")
+    return m[["year","teamID","ParkFactor"]]
+
+try:
+    pf = compute_park_factors(retro_dir)
+    if len(pf):
+        pf.to_csv(OUT/"retrosheet_park_factors.csv", index=False)
+        log(f"[RETRO] park factors rows={len(pf)} -> output/retrosheet_park_factors.csv")
+    else:
+        log("[RETRO] park factors not available")
+except Exception as e:
+    log(f"[RETRO][WARN] park factor failed: {e}")
+    pf = pd.DataFrame(columns=["year","teamID","ParkFactor"])
+
+# ---------- Day 60: 리그 비교 리포트 ----------
+bat2 = bat.assign(PA = nz(bat.get("AB",0))+nz(bat.get("BB",0))+nz(bat.get("HBP",0))+nz(bat.get("SH",0))+nz(bat.get("SF",0)))
+bat2["TB"] = (nz(bat2["H"])-nz(bat2["2B"])-nz(bat2["3B"])-nz(bat2["HR"])) + 2*nz(bat2["2B"]) + 3*nz(bat2["3B"]) + 4*nz(bat2["HR"])
+b_yr = bat2.groupby(["yearID","lgID"], as_index=False).agg({"R":"sum","HR":"sum","BB":"sum","SO":"sum","H":"sum","AB":"sum","PA":"sum","TB":"sum"})
+b_yr["AVG"] = b_yr["H"]/b_yr["AB"].replace(0,np.nan)
+b_yr["OBP"] = (b_yr["H"]+b_yr["BB"])/(b_yr["AB"]+b_yr["BB"]).replace(0,np.nan)
+b_yr["SLG"] = b_yr["TB"]/b_yr["AB"].replace(0,np.nan)
+b_yr["OPS"] = b_yr["OBP"] + b_yr["SLG"]
+
+pit2 = pit.copy()
+pit2["IP"] = nz(pit2.get("IPouts",0))/3.0
+p_yr = pit2.groupby(["yearID","lgID"], as_index=False).agg({"R":"sum","ER":"sum","HR":"sum","BB":"sum","SO":"sum","IP":"sum"})
+p_yr["ERA"] = 9.0*p_yr["ER"]/p_yr["IP"].replace(0,np.nan)
+p_yr["RA9"] = 9.0*p_yr["R"]/p_yr["IP"].replace(0,np.nan)
+
+def pivot_league(df, cols):
+    out=[]
+    for c in cols:
+        t = df.pivot(index="yearID", columns="lgID", values=c)
+        t.columns=[f"{c}_{x}" for x in t.columns]
+        out.append(t)
+    return pd.concat(out, axis=1).reset_index()
+
+L = pivot_league(b_yr, ["R","HR","BB","SO","AVG","OBP","SLG","OPS"]).merge(
+    pivot_league(p_yr, ["ERA","RA9","HR","BB","SO"]), on="yearID", how="outer"
+).sort_values("yearID")
+
+stat_league = pd.DataFrame()
+if len(stat_agg):
+    t = stat_agg.groupby("year", as_index=False).agg(
+        xwOBA_mean=("xwOBA_mean","mean"),
+        EV_avg=("EV_avg","mean"),
+        HardHitRate=("HardHitRate","mean")
+    ).sort_values("year")
+    stat_league = t
+
+pf_summary = pd.DataFrame()
+if len(pf):
+    pf_summary = pf.groupby("year", as_index=False)["ParkFactor"].agg(["mean","std"]).reset_index().rename(columns={"mean":"PF_mean","std":"PF_std"})
+
+md=[]
+md.append("# MLB League Comparison Report (AL vs NL) — Lahman+Chadwick+Statcast+Retrosheet\n")
+md.append(f"- Generated: {dt.datetime.utcnow().isoformat()}Z  \n")
+md.append("## OPS/ERA (last 10 seasons)\n")
+for _,r in L.dropna(subset=["OPS_AL","OPS_NL","ERA_AL","ERA_NL"]).tail(10).iterrows():
+    md.append(f"- **{int(r['yearID'])}**: OPS AL={r['OPS_AL']:.3f} / NL={r['OPS_NL']:.3f} | ERA AL={r['ERA_AL']:.2f} / NL={r['ERA_NL']:.2f}")
+if len(stat_league):
+    md.append("\n## Statcast league trend (2015+) — xwOBA / EV / HardHit\n")
+    for _,r in stat_league.tail(10).iterrows():
+        md.append(f"- {int(r['year'])}: xwOBA≈{r['xwOBA_mean']:.3f}, EV≈{r['EV_avg']:.2f}, HardHit≈{r['HardHitRate']:.3f}")
+if len(pf_summary):
+    y=int(pf_summary["year"].max()); row=pf_summary[pf_summary["year"]==y].iloc[0]
+    md.append(f"\n## Park factors — {y}\n- mean≈{row['PF_mean']:.3f}, std≈{row['PF_std']:.3f}")
+(OUT/"league_report.md").write_text("\n".join(md), encoding="utf-8")
+log("[DAY60] output/league_report.md written")
+
+
+# ---------- Day 62: 분석용 마트 (Lahman-only, 무필터 보존) ----------
+bat_cols = ["yearID","teamID","playerID","G","AB","R","H","2B","3B","HR","RBI","BB","SO","SB","CS","HBP","SF","SH"]
+pit_cols = ["yearID","teamID","playerID","W","L","G","GS","SV","IPouts","H","R","ER","HR","BB","SO"]
+
+bat_src = bat2[[c for c in bat_cols if c in bat2.columns]].copy()
+pit_src = pit2[[c for c in pit_cols if c in pit2.columns]].copy()
+
+# 수치형 변환
+import numpy as np, pandas as pd
+for df in (bat_src, pit_src):
+    for c in df.columns:
+        if c not in ["yearID","teamID","playerID"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+# 공통 파생: PA, SLG/OBP/OPS, IP/ERA/WHIP
+bat_src["PA"] = bat_src[["AB","BB","HBP","SF","SH"]].fillna(0).sum(axis=1)
+oneB = (bat_src["H"] - bat_src[["2B","3B","HR"]].fillna(0).sum(axis=1)).clip(lower=0)
+TB   = oneB + 2*bat_src["2B"].fillna(0) + 3*bat_src["3B"].fillna(0) + 4*bat_src["HR"].fillna(0)
+bat_src["SLG"] = (TB / bat_src["AB"].replace(0,np.nan))
+bat_src["OBP"] = ((bat_src["H"]+bat_src["BB"]+bat_src["HBP"]) /
+                  (bat_src["AB"]+bat_src["BB"]+bat_src["HBP"]+bat_src["SF"]).replace(0,np.nan))
+bat_src["OPS"] = bat_src["OBP"] + bat_src["SLG"]
+
+pit_src["IP"]  = pit_src["IPouts"].astype(float)/3.0
+pit_src["ERA"] = (9.0 * pit_src["ER"]) / pit_src["IP"].replace(0,np.nan)
+pit_src["WHIP"]= (pit_src["BB"]+pit_src["H"]) / pit_src["IP"].replace(0,np.nan)
+
+bat_src["year"] = bat_src["yearID"]; pit_src["year"] = pit_src["yearID"]
+bat_src["role"] = "bat";             pit_src["role"] = "pit"
+
+cols_keep_b = ["year","teamID","playerID","role","PA","AB","R","H","2B","3B","HR","RBI","BB","SO","SB","CS","OBP","SLG","OPS"]
+cols_keep_p = ["year","teamID","playerID","role","IPouts","IP","H","R","ER","HR","BB","SO","ERA","WHIP","W","L","G","GS","SV"]
+bat_keep = bat_src[[c for c in cols_keep_b if c in bat_src.columns]]
+pit_keep = pit_src[[c for c in cols_keep_p if c in pit_src.columns]]
+
+star = pd.concat([bat_keep, pit_keep], ignore_index=True)
+star.to_csv(OUT/"mart_star.csv", index=False)
+log(f"[DAY62] output/mart_star.csv rows={len(star)} (Lahman-only baseline)")
+
+
+
+
+# ---------- Day 63: 품질 벤치마크 테스트 (AL/NL, 1901+) ----------
+from pathlib import Path as _P
+
+def _ff(name):
+    cc = list((ROOT/'data'/'lahman_extracted').rglob(name)) or list((ROOT/'data').rglob(name))
+    assert cc, f"{name} not found"
+    cc.sort(key=lambda p:p.stat().st_size, reverse=True)
+    return cc[0]
+
+# 기준 키: AL/NL & 1901+
+teams = pd.read_csv(_ff('Teams.csv'))[['yearID','teamID','lgID']]
+modern = teams[(teams['lgID'].isin(['AL','NL'])) & (teams['yearID']>=1901)][['yearID','teamID']].drop_duplicates()
+modern['teamID'] = modern['teamID'].astype(str).str.upper()
+key = modern.rename(columns={'yearID':'year'})
+
+# mart_star 집계
+ms = pd.read_csv(OUT/'mart_star.csv', low_memory=False)
+ms['year'] = pd.to_numeric(ms['year'], errors='coerce')
+ms['teamID'] = ms['teamID'].astype(str).str.upper()
+msb = ms[ms['role']=='bat'].groupby(['year','teamID'], as_index=False).agg(HR=('HR','sum'), PA=('PA','sum'))
+msp = ms[ms['role']=='pit'].groupby(['year','teamID'], as_index=False).agg(ER=('ER','sum'), IPouts=('IPouts','sum'))
+msb = msb.merge(key, on=['year','teamID'], how='inner')
+msp = msp.merge(key, on=['year','teamID'], how='inner')
+
+# Lahman 집계 (PA 구성요소 보정, IP→IPouts 보정)
+bat = pd.read_csv(_ff('Batting.csv'), low_memory=False)
+for c in ['AB','BB','HBP','SF','SH','HR']:
+    if c not in bat.columns: bat[c]=0
+bat['PA'] = bat[['AB','BB','HBP','SF','SH']].apply(pd.to_numeric, errors='coerce').fillna(0).sum(axis=1)
+batg = bat.groupby(['yearID','teamID'], as_index=False).agg(HR=('HR','sum'), PA=('PA','sum')).rename(columns={'yearID':'year'})
+batg['teamID'] = batg['teamID'].astype(str).str.upper()
+batg = batg.merge(key, on=['year','teamID'], how='inner')
+
+pit = pd.read_csv(_ff('Pitching.csv'), low_memory=False)
+if 'IPouts' not in pit.columns and 'IP' in pit.columns:
+    def _ip2o(x):
+        try:
+            f=float(x); i=int(f); d=round(f-i,1)
+            return i*3 + (1 if abs(d-0.1)<1e-8 else 2 if abs(d-0.2)<1e-8 else 0)
+        except: return 0
+    pit['IPouts'] = pit['IP'].map(_ip2o)
+pitg = pit.groupby(['yearID','teamID'], as_index=False).agg(ER=('ER','sum'), IPouts=('IPouts','sum')).rename(columns={'yearID':'year'})
+pitg['teamID'] = pitg['teamID'].astype(str).str.upper()
+pitg = pitg.merge(key, on=['year','teamID'], how='inner')
+
+# 비교 및 통계
+cmpb = msb.merge(batg, on=['year','teamID'], how='outer', suffixes=('_mart','_lah'))
+cmpp = msp.merge(pitg, on=['year','teamID'], how='outer', suffixes=('_mart','_lah'))
+
+def _pass(df, a, b, tol_rel=0.01, tol_abs=1.0):
+    a1 = pd.to_numeric(df[a], errors='coerce').fillna(0)
+    b1 = pd.to_numeric(df[b], errors='coerce').fillna(0)
+    d  = (a1-b1).abs()
+    base = b1.abs().replace(0, np.nan)
+    ok = ((d<=tol_abs) | ((d/base)<=tol_rel)).fillna(True)
+    return float(ok.mean())
+
+summary = {
+  "HR_pass": _pass(cmpb,'HR_mart','HR_lah'),
+  "PA_pass": _pass(cmpb,'PA_mart','PA_lah'),
+  "ER_pass": _pass(cmpp,'ER_mart','ER_lah'),
+  "IPouts_pass": _pass(cmpp,'IPouts_mart','IPouts_lah'),
+}
+pass_rate = round(np.mean(list(summary.values())), 3)
+
+pd.concat([
+    cmpb[['year','teamID','HR_mart','HR_lah','PA_mart','PA_lah']],
+    cmpp[['year','teamID','ER_mart','ER_lah','IPouts_mart','IPouts_lah']]
+], axis=1).to_csv(TEST/'benchmark_set.csv', index=False)
+
+print(f"[DAY63] {TEST/'benchmark_set.csv'} rows={len(cmpb)} pass_rate≈{pass_rate} detail="+str(summary))
+# ---------- Day 64: 벤치마크(±1%) ----------
+ms = pd.read_csv(OUT/"mart_star.csv", low_memory=False)
+
+# 타격 합: HR/PA
+mart_b = ms[ms["role"]=="bat"].groupby(["year","teamID"], as_index=False).agg(
+    HR=("HR","sum"), PA=("PA","sum")
+)
+lah_b  = bat2.groupby(["yearID","teamID"], as_index=False).agg(
+    HR=("HR","sum"), PA=("PA","sum")
+).rename(columns={"yearID":"year"})
+cmp_b = mart_b.merge(lah_b, on=["year","teamID"], suffixes=("_mart","_lah"))
+cmp_b["HR_diff_rel"] = (cmp_b["HR_mart"] - cmp_b["HR_lah"]) / cmp_b["HR_lah"].replace(0,np.nan)
+cmp_b["PA_diff_rel"] = (cmp_b["PA_mart"] - cmp_b["PA_lah"]) / cmp_b["PA_lah"].replace(0,np.nan)
+
+# 투수 합: ER + IPouts
+ms["IPouts"] = pd.to_numeric(ms.get("IPouts", np.nan), errors="coerce")
+mart_p = ms[ms["role"]=="pit"].groupby(["year","teamID"], as_index=False).agg(
+    ER=("ER","sum"), IPouts=("IPouts","sum")
+)
+tmp_l = pit2.copy()
+tmp_l["IPouts"] = pd.to_numeric(tmp_l.get("IPouts", np.nan), errors="coerce")
+if tmp_l["IPouts"].isna().all() and "IP" in tmp_l.columns:
+    # IP → outs 변환
+    tmp_l["IPouts"] = pd.to_numeric(tmp_l["IP"], errors="coerce")*3.0
+lah_p = tmp_l.groupby(["yearID","teamID"], as_index=False).agg(
+    ER=("ER","sum"), IPouts=("IPouts","sum")
+).rename(columns={"yearID":"year"})
+cmp_p = mart_p.merge(lah_p, on=["year","teamID"], suffixes=("_mart","_lah"))
+cmp_p["ER_diff_rel"]     = (cmp_p["ER_mart"]     - cmp_p["ER_lah"])     / cmp_p["ER_lah"].replace(0,np.nan)
+cmp_p["IPouts_diff_rel"] = (cmp_p["IPouts_mart"] - cmp_p["IPouts_lah"]) / cmp_p["IPouts_lah"].replace(0,np.nan)
+
+bench_df = pd.concat([cmp_b, cmp_p], ignore_index=True)
+bench_df.to_csv("tests/benchmark_set.csv", index=False)
+ok = (bench_df.filter(like="_diff_rel").abs() <= 0.01).mean().mean()
+log(f"[DAY63] tests/benchmark_set.csv rows={len(bench_df)} pass_rate≈{ok:.3f}")
+
+# ---------- Day 64: Trade Value v1 (WAR/$) ----------
+def pick_col(df, candidates):
+    for c in candidates:
+        if c in df.columns: return c
+    return None
+
+cards = None
+cards_path = ROOT/"output"/"player_cards.csv"
+if cards_path.exists():
+    tmp = pd.read_csv(cards_path, low_memory=False)
+    # WAR 컬럼 찾기
+    war_col = pick_col(tmp, ["WAR","fWAR","bWAR","war_total","war"])
+    # id/year/name 유연 매핑
+    id_col   = pick_col(tmp, ["playerID","bbrefID","mlbam","retroID","fgID"])
+    year_col = pick_col(tmp, ["year","season","season_year","Season"])
+    name_col = pick_col(tmp, ["player_name","name","Name","full_name"])
+    if war_col and id_col and year_col:
+        tmp = tmp.rename(columns={war_col:"WAR", id_col:"_ID", year_col:"year"})
+        if name_col and name_col not in ("player_name"):
+            tmp = tmp.rename(columns={name_col:"player_name"})
+        cards = tmp[["_ID","year","WAR","player_name"]].copy()
+        cards["_ID"] = cards["_ID"].astype(str)
+else:
+    log("[DAY64][WARN] player_cards.csv not found")
+
+# trade 베이스
+# 기본
+trade = star.copy()
+
+# People 이름 붙이기
+try:
+    ppl = pd.read_csv(lahman_base/"People.csv", usecols=["playerID","nameFirst","nameLast"])
+    ppl["player_name"] = (ppl["nameFirst"].fillna("")+" "+ppl["nameLast"].fillna("")).str.strip()
+    trade = trade.merge(ppl[["playerID","player_name"]], on="playerID", how="left")
+except Exception:
+    trade["player_name"] = trade.get("player_name", pd.Series([np.nan]*len(trade)))
+
+# 리그 라벨
+try:
+    teams = pd.read_csv(lahman_base/"Teams.csv", usecols=["yearID","teamID","lgID"]).rename(columns={"yearID":"year"})
+    trade = trade.merge(teams, on=["year","teamID"], how="left")
+except Exception:
+    trade["lgID"] = np.nan
+
+# 파생 보정
+if "IP" not in trade.columns and "IPouts" in trade.columns:
+    trade["IP"] = pd.to_numeric(trade["IPouts"], errors="coerce")/3.0
+if "OPS" not in trade.columns and {"OBP","SLG"}.issubset(trade.columns):
+    trade["OPS"] = trade["OBP"] + trade["SLG"]
+if "ERA" not in trade.columns and {"ER","IP"}.issubset(trade.columns):
+    trade["ERA"] = (9.0*pd.to_numeric(trade["ER"], errors="coerce"))/trade["IP"].replace(0,np.nan)
+
+# 필요한 최소 컬럼만 유지
+keep_cols = ["year","teamID","playerID","player_name","lgID","PA","IP","OPS","ERA","WAR","salary"]
+for c in keep_cols:
+    if c not in trade.columns: trade[c] = np.nan
+trade = trade[keep_cols].copy()
+
+# cards 병합: 우선순위 playerID → bbrefID → mlbam
+trade["WAR"] = np.nan
+if cards is not None:
+    # playerID가 cards에 없다면, pep으로 bbrefID→playerID 매핑 보강
+    if "_ID" in cards.columns:
+        for key in ["playerID","bbrefID","mlbam"]:
+            if key in trade.columns:
+                left_key = key
+                right = cards.rename(columns={"_ID":"key_join"})
+                # trade 쪽도 문자열화
+                trade[left_key] = trade[left_key].astype(str)
+                merged = trade.merge(right, left_on=left_key, right_on="key_join", how="left", suffixes=("","_c"))
+                # 우선 매칭된 WAR 채우기
+                trade["WAR"] = merged["WAR"].where(trade["WAR"].isna(), trade["WAR"])
+                if "player_name_c" in merged.columns:
+                    trade["player_name"] = trade["player_name"].fillna(merged["player_name_c"])
+                # 매칭 성공했으면 더 진행
+        # 끝
+    else:
+        log("[DAY64][WARN] cards has no _ID column after mapping")
+
+# 연봉 합치기 (가능하면 playerID 기반)
+salaries = pd.DataFrame()
+try:
+    sal_csv = find_csv(r"^Salaries\.csv$", [lahman_base])
+    salaries = pd.read_csv(sal_csv, usecols=["playerID","yearID","teamID","salary"])
+    salaries = salaries.rename(columns={"yearID":"year"})
+except Exception:
+    salaries = pd.DataFrame()
+
+trade["salary"] = np.nan
+if len(salaries):
+    # playerID가 있는 행에만 연봉 조인
+    if "playerID" in trade.columns:
+        trade = trade.merge(salaries, on=["playerID","year","teamID"], how="left")
+    else:
+        # playerID 없으면 연봉은 NaN 유지
+        pass
+
+# WAR 프록시 (cards 병합 실패시)
+if trade["WAR"].isna().all():
+    t1 = trade[["year","OPS"]].dropna().groupby("year", as_index=False).agg(mu=("OPS","mean"), sd=("OPS","std"))
+    trade = trade.merge(t1, on="year", how="left")
+    trade["batWARproxy"] = (trade["OPS"]-trade["mu"])/trade["sd"]
+    t2 = trade[["year","ERA"]].dropna().groupby("year", as_index=False).agg(mu2=("ERA","mean"), sd2=("ERA","std"))
+    trade = trade.merge(t2, on="year", how="left")
+    trade["pitWARproxy"] = -(trade["ERA"]-trade["mu2"])/trade["sd2"]
+    trade["WAR"] = trade[["batWARproxy","pitWARproxy"]].mean(axis=1)
+    trade.drop(columns=["mu","sd","mu2","sd2","batWARproxy","pitWARproxy"], inplace=True)
+
+
+# --- salary 컬럼 정규화(coalesce) ---
+sal_cols = [c for c in trade.columns if c.lower().startswith("salary")]
+if "salary" not in trade.columns:
+    if "salary_y" in trade.columns:
+        trade["salary"] = trade["salary_y"]
+    elif "salary_sal" in trade.columns:
+        trade["salary"] = trade["salary_sal"]
+    elif "salary_x" in trade.columns:
+        trade["salary"] = trade["salary_x"]
+    else:
+        trade["salary"] = np.nan
+for c in ["salary_x","salary_y","salary_sal"]:
+    if c in trade.columns:
+        trade.drop(columns=[c], inplace=True)
+trade["salaryMM"] = trade["salary"]/1_000_000.0
+
+trade["WAR_per_$MM"] = trade["WAR"] / trade["salaryMM"].replace(0,np.nan)
+trade_val = trade[["year","teamID","playerID","player_name","WAR","salary","salaryMM","WAR_per_$MM"]].copy()
+trade_val.to_csv(OUT/"trade_value.csv", index=False)
+log(f"[DAY64] output/trade_value.csv rows={len(trade_val)}")
+
+summary = {
+  "sources": {
+    "lahman": str(lahman_base),
+    "chadwick": str(chad_dir) if chad_dir else None,
+    "statcast_dirs": [str(d) for d in stat_dirs],
+    "retrosheet": str(retro_dir) if retro_dir else None
+  },
+  "artifacts": {
+    "league_report_md": "output/league_report.md",
+    "statcast_agg": "output/statcast_agg_player_year.csv",
+    "park_factors": "output/retrosheet_park_factors.csv" if len(pf) else None,
+    "mart_star": "output/mart_star.csv",
+    "benchmark": "tests/benchmark_set.csv",
+    "trade_value": "output/trade_value.csv"
+  }
+}
+with open(LOGS/"day60_64_summary.json","w",encoding="utf-8") as f:
+    json.dump(summary, f, ensure_ascii=False, indent=2)
+
+log("[DONE] Day60–64 multi-source pipeline complete")

@@ -1,0 +1,4 @@
+mlbam_id,kbo_id,league,player_uid,bats,throws,primary_pos,level,name_full,birth_date
+592450.0,,MLB,mlbam:592450,R,R,CF,,John Doe,1997-03-10
+,640123.0,KBO,kbo:640123,L,R,2B,,김철수,1996-08-21
+700001.0,,MiLB,mlbam:700001,R,R,P,AAA,Jane Pitcher,2000-05-30

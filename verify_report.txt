@@ -1,0 +1,7 @@
+[START] verify_report @ 2025-10-05T03:07:34.803060+00:00
+rows=1400, cols=30
+[OK] 핵심 컬럼 null 수: {'player_uid': 0, 'season': 0, 'league': 0, 'team_id': 0, 'name_full': 0, 'age': 1400, 'pa_or_bf': 265, 'war': 1400}
+[OK] league ∈ {MLB,KBO,MiLB}
+[OK] 유니크 키 일관성 통과
+[OK] 퍼센타일 범위 확인 완료
+[DONE] verify_report 저장 완료 @ 2025-10-05T03:07:34.803060+00:00

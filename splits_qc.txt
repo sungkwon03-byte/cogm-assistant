@@ -1,0 +1,7 @@
+[중복] mlb_id=271232, retro_id=271123, bbref_id=271260
+[통계] vsL_OPS: null=10.02%, mean=0.570, std=0.429, outliers=6474
+[통계] vsR_OPS: null=3.52%, mean=0.561, std=0.406, outliers=6028
+[통계] vsL_OPS_allowed: null=6.05%, mean=0.828, std=0.447, outliers=2036
+[통계] vsR_OPS_allowed: null=4.23%, mean=0.805, std=0.399, outliers=3930
+
+✅ QC PASS

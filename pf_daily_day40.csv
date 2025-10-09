@@ -1,0 +1,4 @@
+venue,date,temp_c,wind_kph,precip_mm,run_factor_daily
+Chase Field,2025-04-01,25,10,0,1.0666666666666664
+Chase Field,2025-04-02,27,8,0,1.0733333333333333
+Oracle Park,2025-04-03,18,22,1,0.9916666666666667

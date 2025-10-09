@@ -1,2 +1,10 @@
 .env
 data/
+output/cache/
+data/retrosheet/
+tmp/
+logs/
+*.bak
+*.log.gz
+__pycache__/
+*.tar.gz

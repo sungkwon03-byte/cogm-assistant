@@ -1,0 +1,16 @@
+{
+  "player_uid": "string",
+  "name_full": "string",
+  "league": "string",
+  "team_id": "string",
+  "season": "int",
+  "age": "float",
+  "pa_or_bf": "int",
+  "war": "float",
+  "wrc_plus": "float",
+  "era": "float",
+  "fip": "float",
+  "standard_scale": "string",
+  "last_update_utc": "string",
+  "data_version": "string"
+}
