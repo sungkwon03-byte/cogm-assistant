@@ -1,4 +1,3 @@
-umpire,zone_expand_pct,low_strike_bias,euz_adj_batter,euz_adj_pitcher
-U1,0.08,0.06,0.9299999999999999,-0.07
-U2,0.12,0.1,0.89,-0.11
-U3,0.06,0.04,0.95,-0.05
+version https://git-lfs.github.com/spec/v1
+oid sha256:a9574650cd6eae55955be8b5c94124f9734a550996e2281aaee58525c5f4fe51
+size 155

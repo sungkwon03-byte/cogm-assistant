@@ -1,14 +1,3 @@
-game_pk,date,venue,home,away,home_runs,away_runs
-778485,2025-04-01,Petco Park,SD,CLE,7,0
-778486,2025-04-01,T-Mobile Park,SEA,DET,1,4
-778487,2025-04-01,Dodger Stadium,LAD,ATL,3,1
-778488,2025-04-01,American Family Field,MIL,KC,5,0
-778489,2025-04-01,Daikin Park,HOU,SF,1,3
-778490,2025-04-01,Rate Field,CWS,MIN,3,8
-778491,2025-04-01,Rogers Centre,TOR,WSH,5,3
-778492,2025-04-01,Yankee Stadium,NYY,AZ,5,7
-778493,2025-04-01,George M. Steinbrenner Field,TB,PIT,7,0
-778494,2025-04-01,Sutter Health Park,ATH,CHC,4,7
-778495,2025-04-01,Busch Stadium,STL,LAA,7,9
-778497,2025-04-01,loanDepot park,MIA,NYM,4,2
-778498,2025-04-01,Great American Ball Park,CIN,TEX,0,1
+version https://git-lfs.github.com/spec/v1
+oid sha256:ca6ce764e7d026a8531011dd5b12436b3db0887d817d404cb2617fc1b8802ba9
+size 650

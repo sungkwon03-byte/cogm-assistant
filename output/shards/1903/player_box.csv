@@ -1,1 +1,3 @@
-game_pk,team,mlb_id,name,PA,H,HR,BB,SO,IP_outs,K_p,BB_p,ER
+version https://git-lfs.github.com/spec/v1
+oid sha256:ea481ad183b6fd2deae7259a7f2572c47580d986a884ebf6d6aefb105cd7c151
+size 60

@@ -1,4 +1,3 @@
-date,team,opponent,home_away,venue,opponent_elo,dist_km,tz_diff,rest_days,SoS,RestIndex,FatigueScore,CSI
-2025-04-01,ARI,LAD,H,Chase Field,1580,0.0,0.0,2,0.7,1.0,0.0,0.85
-2025-04-02,ARI,LAD,H,Chase Field,1582,0.0,0.0,0,0.705,0.0,0.0,0.652
-2025-04-03,ARI,SF,A,Oracle Park,1540,1049.4,0.0,0,0.6,0.0,0.22,0.534
+version https://git-lfs.github.com/spec/v1
+oid sha256:a541118386b4e3267e73b1701412229fc1b393115d391db2ed187112301e23fb
+size 307

@@ -1,9 +1,3 @@
-full_name,nkey,mlb_id,retro_id,bbref_id,method
-Ryu Hyun-jin,RYU HYUN JIN,,,,exact_nkey_or_alias
-Kim Ha-seong,KIM HA SEONG,,,,exact_nkey_or_alias
-Koo Chang-mo,KOO CHANG MO,,,,exact_nkey_or_alias
-Kang Baek-ho,KANG BAEK HO,,,,exact_nkey_or_alias
-Yang Hyeon-jong,YANG HYEON JONG,,,,exact_nkey_or_alias
-Park Byung-ho,PARK BYUNG HO,,,,exact_nkey_or_alias
-Lee Jung-hoo,LEE JUNG HOO,,,,exact_nkey_or_alias
-Kim Kwang-hyun,KIM KWANG HYUN,,,,exact_nkey_or_alias
+version https://git-lfs.github.com/spec/v1
+oid sha256:0759b90bb032c6abcbfda48e946521126364613fe616f1683377c269f8a42b90
+size 451

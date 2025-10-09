@@ -1,4 +1,3 @@
-player,years,war_y1,war_y2,war_y3,salary_y1,salary_y2,salary_y3,pos,age,hand,team,NPV_value,NPV_cost,Surplus
-Prospect A,3,1.8,2.3,2.5,0.8,1.2,1.8,SS,22,R,ARI,50608139.003200725,3.198445358939186,50608135.80475537
-Starter B,2,3.0,2.6,,15.0,18.0,,SP,29,R,LAD,45061728.39506173,29.320987654320987,45061699.074074075
-Reliever C,1,1.0,,,2.5,,,RP,28,R,ARI,8333333.333333333,2.314814814814815,8333331.018518519
+version https://git-lfs.github.com/spec/v1
+oid sha256:91d446626c0ad7c835e0ac03a5603be8ef2d6eb608a637929dc9c37bac4a5b0f
+size 404

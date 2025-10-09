@@ -1,8 +1,3 @@
-full_name,nkey,mlb_id,retro_id,bbref_id,method
-Ryu Hyun-jin,RYU HYUN JIN,547943,ryu-h001,ryuhy01,exact_nkey_or_alias
-Kim Ha-seong,KIM HA SEONG,673490,kim-h002,kimha01,exact_nkey_or_alias
-Eric Jokisch,ERIC JOKISCH,518852,jokie001,jokiser01,exact_nkey_or_alias
-Yang Hyeon-jong,YANG HYEON JONG,660365,yangh001,yanghy01,exact_nkey_or_alias
-Park Byung-ho,PARK BYUNG HO,666560,parkb002,parkby01,exact_nkey_or_alias
-Lee Jung-hoo,LEE JUNG HOO,808982,lee-j001,leeju01,exact_nkey_or_alias
-Kim Kwang-hyun,KIM KWANG HYUN,547942,kim-k001,kimkw01,exact_nkey_or_alias
+version https://git-lfs.github.com/spec/v1
+oid sha256:471efb4cc19fccbf035f71ba5d0bc23b67165bc1725bbbd8b57899fa0b574ba7
+size 553
