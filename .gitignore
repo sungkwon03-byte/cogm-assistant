@@ -9,3 +9,7 @@ logs/
 __pycache__/
 *.tar.gz
 cogm-assistant/
+output/
+logs/
+*.parquet
+*.tar.gz
