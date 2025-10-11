@@ -1,0 +1,14 @@
+[RUN] sequence-level features
+[OK] seq_pitch_features.parquet
+[RUN] pitcher-season transition matrix
+[OK] pitcher_transition_matrix.parquet
+[RUN] pitcher-season summary
+[OK] pitcher_season_summary.parquet
+[RUN] batter-season angle variability
+[OK] batter_season_angle.parquet
+❌ ERROR: Parser Error: syntax error at or near "TRUE" (pipeline continues, exit=0)
+[OK] enriched -> output/player_cards_enriched_all_seq.csv rows=107263
+Traceback (most recent call last):
+  File "<stdin>", line 76, in <module>
+duckdb.duckdb.ParserException: Parser Error: syntax error at or near "rows"
+[COVERAGE] skip: Parser Error: syntax error at or near "rows"

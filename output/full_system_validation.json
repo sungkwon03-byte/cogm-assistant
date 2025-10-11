@@ -1,0 +1,10 @@
+{
+  "cards_min_season_ge_1901": true,
+  "cards_max_season_le_2026": true,
+  "cards_count_gt_0": true,
+  "statcast_min_year_ge_2015": true,
+  "statcast_max_year_ge_2025": true,
+  "statcast_count_gt_0": true,
+  "visuals_all_present": true,
+  "reports_v2_present": true
+}
