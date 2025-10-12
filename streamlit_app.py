@@ -17,6 +17,7 @@ for p in (OUT, REP, SUM, LOG):
 # -----------------------------
 # 0) Bundle auto-fetch (optional)
 # -----------------------------
+
 def fetch_bundle_if_needed():
     url = os.environ.get("BUNDLE_URL") or st.secrets.get("BUNDLE_URL", "")
     if not url:
@@ -25,28 +26,22 @@ def fetch_bundle_if_needed():
     if marker.exists():
         return None
     try:
-        import requests
+        import requests, tarfile, io
         st.info("Downloading artifacts bundle…")
         r = requests.get(url, timeout=60)
         r.raise_for_status()
         buf = io.BytesIO(r.content)
+        # output/ 하위 항목만 상대경로로 안전 추출
         with tarfile.open(fileobj=buf, mode="r:gz") as tf:
-            tf.extractall(path="/")  # bundle might be absolute-path packed
-        legacy = Path("/workspaces/cogm-assistant/output")
-        if legacy.exists():
-            for sub in legacy.rglob("*"):
-                rel = sub.relative_to(legacy)
-                dst = OUT / rel
-                if sub.is_dir():
-                    dst.mkdir(parents=True, exist_ok=True)
-                else:
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        dst.write_bytes(sub.read_bytes())
-                    except Exception:
-                        pass
+            def safe_members(members):
+                for m in members:
+                    name = m.name.lstrip("/").replace("..", "")
+                    if name.startswith("output/"):  # output/만 허용
+                        m.name = name
+                        yield m
+            tf.extractall(path=ROOT, members=safe_members(tf.getmembers()))
         marker.write_text("ok")
-        st.success("Artifacts fetched & synced to ./output")
+        st.success("Artifacts fetched into ./output")
     except Exception as e:
         st.warning(f"Bundle fetch skipped: {e}")
 
