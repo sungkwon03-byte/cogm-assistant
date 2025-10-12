@@ -32,15 +32,20 @@ def fetch_bundle_if_needed():
         r.raise_for_status()
         buf = io.BytesIO(r.content)
         # output/ 하위 항목만 상대경로로 안전 추출
-        with tarfile.open(fileobj=buf, mode="r:gz") as tf:
-            def safe_members(members):
-                for m in members:
-                    name = m.name.lstrip("/").replace("..", "")
-                    if name.startswith("output/"):  # output/만 허용
-                        m.name = name
-                        yield m
-            tf.extractall(path=ROOT, members=safe_members(tf.getmembers()))
-        marker.write_text("ok")
+        
+with tarfile.open(fileobj=buf, mode="r:gz") as tf:
+    # Python 3.14에서 기본 필터가 엄격해지므로 filter 콜백 사용
+    def member_filter(ti: tarfile.TarInfo):
+        # 경로 정규화 & 출구 제한
+        name = ti.name.lstrip("/").replace("..", "")
+        # output/ 하위만 허용
+        if not name.startswith("output/"):
+            return None
+        # 상대경로로 강제
+        ti.name = name
+        return ti
+    tf.extractall(path=ROOT, filter=member_filter)
+marker.write_text("ok")
         st.success("Artifacts fetched into ./output")
     except Exception as e:
         st.warning(f"Bundle fetch skipped: {e}")
