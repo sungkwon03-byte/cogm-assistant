@@ -7,6 +7,13 @@ import tarfile
 import io
 import os, io, json, tarfile
 from pathlib import Path
+ROOT = Path(__file__).resolve().parent
+OUT = ROOT / "output"
+REP = OUT / "reports"
+SUM = OUT / "summaries"
+LOG = ROOT / "logs"
+for _p in (OUT, REP, SUM, LOG):
+    _p.mkdir(parents=True, exist_ok=True)
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -21,7 +28,7 @@ for _p in (OUT, REP, SUM, LOG):
 
 
 # ---------- Streamlit page config FIRST ----------
-st.set_page_config(page_title="Co-GM Core — MLB HF Final", layout="wide")
+st.set_page_config(page_title="Co-GM Core — MLB HF Final (EN)", layout="wide")
 
 # ---------- Paths ----------
 ROOT = Path(__file__).resolve().parent
@@ -34,8 +41,46 @@ for p in (OUT, REP, SUM, LOG):
 
 # ---------- Bundle fetch (fully sandboxed; never crash) ----------
 
+
 def fetch_bundle_if_needed():
-    url = os.environ.get("BUNDLE_URL")
+    url = os.environ.get("BUNDLE_URL") or st.secrets.get("BUNDLE_URL", "")
+    if not url:
+        return
+    marker = OUT / ".bundle_fetched"
+    if marker.exists():
+        return
+    try:
+        import requests
+        with st.spinner("Downloading artifacts bundle…"):
+            r = requests.get(url, timeout=120, allow_redirects=True)
+            r.raise_for_status()
+            buf = io.BytesIO(r.content)
+
+            cache = ROOT / ".cache_bundle"
+            if cache.exists():
+                shutil.rmtree(cache, ignore_errors=True)
+            cache.mkdir(parents=True, exist_ok=True)
+
+            with tarfile.open(fileobj=buf, mode="r:gz") as tf:
+                tf.extractall(path=cache)
+
+            # deepest 'output/' in the bundle → sync to ./output
+            candidates = [pp for pp in cache.rglob("output") if pp.is_dir()]
+            if not candidates:
+                raise RuntimeError("No 'output/' directory found in bundle")
+            src_out = max(candidates, key=lambda pp: len(str(pp)))
+            for item in src_out.rglob("*"):
+                rel = item.relative_to(src_out)
+                dst = OUT / rel
+                if item.is_dir():
+                    dst.mkdir(parents=True, exist_ok=True)
+                else:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.write_bytes(item.read_bytes())
+            marker.write_text("ok")
+        st.success("Artifacts fetched → ./output")
+    except Exception as e:
+        st.warning(f"Bundle fetch skipped: {e}")
     if not url:
         try:
             url = st.secrets.get("BUNDLE_URL", "")
@@ -127,6 +172,7 @@ def read_qc() -> dict:
 # ---------- Load data (never crash) ----------
 cards_en = read_parquet_safe(OUT/"player_cards_enriched_all_seq.parquet")
 cards    = read_parquet_safe(OUT/"player_cards_all.parquet")
+cards = normalize_player_name_column(cards)
 base_cards = cards_en if not cards_en.empty else cards
 base_cards = ensure_player_name(base_cards)
 
@@ -137,7 +183,7 @@ if not statcast.empty:
     statcast_preview = statcast[cols].head(5000) if cols else pd.DataFrame()
 
 # ---------- UI ----------
-st.title("Co-GM Core — MLB HF Final Build")
+st.title("Co-GM Core — MLB HF Final (EN) Build")
 
 tabs = st.tabs(["Overview", "Player Search", "Trade Evaluator", "Reports"])
 
@@ -146,6 +192,7 @@ with tabs[0]:
     st.subheader("Data Overview")
     st.table(pd.DataFrame([
         {"file":"player_cards_all.parquet",      "rows": len(base_cards), "columns": ", ".join(list(base_cards.columns)[:6])},
+cards = normalize_player_name_column(cards)
         {"file":"statcast_ultra_full_clean.parquet", "rows": len(statcast),   "columns": ", ".join(list(statcast.columns)[:6]) if not statcast.empty else ""},
     ]))
     with st.expander("QC & artifact presence (JSON)", expanded=True):
