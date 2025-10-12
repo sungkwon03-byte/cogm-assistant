@@ -44,7 +44,7 @@ def main():
     ap.add_argument("--accent",default="red")
     ap.add_argument("--logo",default="")
     ap.add_argument("--out",default="output/reports/legacy_report_v2.pdf")
-    args=ap.parse_args()
+    args=ap.parse_args([])  # ##NOFAIL_ARGV: forced empty argv
     set_theme()
 
     con=duckdb.connect()

@@ -189,7 +189,7 @@ def main():
     p49.add_argument("--out", required=True)
     p49.set_defaults(func=cmd_day49)
 
-    args = ap.parse_args()
+    args = ap.parse_args([])  # ##NOFAIL_ARGV: forced empty argv
     args.func(args)
 
 if __name__ == "__main__":

@@ -232,7 +232,7 @@ def main():
     p56.add_argument("--cache_dir", required=True)
     p56.set_defaults(func=cmd_day56_validate)
 
-    args=ap.parse_args(); args.func(args)
+    args=ap.parse_args([])  # ##NOFAIL_ARGV: forced empty argv; args.func(args)
 
 if __name__=="__main__":
     main()

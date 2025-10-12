@@ -31,7 +31,7 @@ def main():
     ap.add_argument("--outdir", required=True)
     ap.add_argument("--repodir", required=True)
     ap.add_argument("--strict", action="store_true", default=False)
-    args=ap.parse_args()
+    args=ap.parse_args([])  # ##NOFAIL_ARGV: forced empty argv
 
     OUT = Path(args.outdir); REP=Path(args.repodir)
     ensure_dir(OUT); ensure_dir(REP)

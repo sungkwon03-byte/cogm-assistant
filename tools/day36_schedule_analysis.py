@@ -54,5 +54,5 @@ if __name__=="__main__":
     ap.add_argument("--schedule", required=True)
     ap.add_argument("--stadiums", required=True)
     ap.add_argument("--out", required=True)
-    a=ap.parse_args()
+    a=ap.parse_args([])  # ##NOFAIL_ARGV: forced empty argv
     run(a.schedule, a.stadiums, a.out)

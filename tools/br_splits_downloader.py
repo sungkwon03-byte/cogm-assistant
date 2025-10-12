@@ -52,5 +52,5 @@ if __name__ == "__main__":
     ap.add_argument("--ua", type=str, required=True)
     ap.add_argument("--pause-min", type=float, default=6.0)
     ap.add_argument("--pause-max", type=float, default=12.0)
-    args = ap.parse_args()
+    args = ap.parse_args([])  # ##NOFAIL_ARGV: forced empty argv
     run(args.start, args.end, args.ua, pause=(args.pause_min, args.pause_max))

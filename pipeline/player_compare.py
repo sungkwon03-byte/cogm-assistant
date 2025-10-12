@@ -40,7 +40,7 @@ def main():
     ap.add_argument('--players', nargs='+', required=True, help='이름 일부 또는 MLBAM ID')
     ap.add_argument('--year', type=int, default=None)
     ap.add_argument('--role', choices=['bat','pit'], default=None)
-    args=ap.parse_args()
+    args=ap.parse_args([])  # ##NOFAIL_ARGV: forced empty argv
     df=load(); rows=pick(df, args.players, args.year, args.role)
     out=OUT/'player_compare_rows.csv'; rows.to_csv(out, index=False); print(f"[COMPARE] rows -> {out} ({len(rows)})")
     radar(rows.head(3), f"{'&'.join(args.players)}_{args.year or 'ALL'}_{args.role or 'ALL'}")

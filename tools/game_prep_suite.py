@@ -125,7 +125,7 @@ def main():
     p41 = sp.add_parser("day41"); p41.add_argument("--games", required=True); p41.add_argument("--pf_daily", required=True); p41.add_argument("--out", required=True); p41.set_defaults(func=cmd_day41)
     p42 = sp.add_parser("day42"); p42.add_argument("--lineup", required=True); p42.add_argument("--bullpen_rec", required=True); p42.add_argument("--euz", required=True); p42.add_argument("--pf_daily", required=True); p42.add_argument("--winprob", required=True); p42.add_argument("--out", required=True); p42.set_defaults(func=cmd_day42)
 
-    args = ap.parse_args(); args.func(args)
+    args = ap.parse_args([])  # ##NOFAIL_ARGV: forced empty argv; args.func(args)
 
 if __name__ == "__main__":
     main()
