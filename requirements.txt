@@ -1,10 +1,7 @@
 streamlit==1.39.0
-pandas==2.2.3
+pandas==2.2.2
+pyarrow==17.0.0
 duckdb==1.1.2
-# pyarrow 또는 fastparquet 둘 중 하나만 있어도 parquet 읽기 가능
-# (pyarrow가 자동으로 깔리는 환경이 많음. fastparquet로도 OK)
-pyarrow==21.0.0
-# fastparquet==2024.5.0
-matplotlib==3.10.0
-pillow==10.4.0   # streamlit 1.39 요구사항(<11)
-requests==2.32.5
+matplotlib==3.10.3
+pillow==11.2.0
+requests==2.32.3

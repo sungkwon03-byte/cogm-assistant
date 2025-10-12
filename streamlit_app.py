@@ -2,11 +2,23 @@
 # -*- coding: utf-8 -*-
 
 # ---------- Imports ----------
+import shutil
+import tarfile
+import io
 import os, io, json, tarfile
 from pathlib import Path
 import pandas as pd
 import numpy as np
 import streamlit as st
+
+ROOT = Path('.').resolve()
+OUT  = ROOT / 'output'
+REP  = OUT / 'reports'
+SUM  = OUT / 'summaries'
+LOG  = ROOT / 'logs'
+for _p in (OUT, REP, SUM, LOG):
+    _p.mkdir(parents=True, exist_ok=True)
+
 
 # ---------- Streamlit page config FIRST ----------
 st.set_page_config(page_title="Co-GM Core — MLB HF Final", layout="wide")
@@ -21,39 +33,54 @@ for p in (OUT, REP, SUM, LOG):
     p.mkdir(parents=True, exist_ok=True)
 
 # ---------- Bundle fetch (fully sandboxed; never crash) ----------
+
 def fetch_bundle_if_needed():
-    try:
-        url = os.environ.get("BUNDLE_URL") or st.secrets.get("BUNDLE_URL", "")
-    except Exception:
-        url = os.environ.get("BUNDLE_URL", "")
+    url = os.environ.get("BUNDLE_URL")
+    if not url:
+        try:
+            url = st.secrets.get("BUNDLE_URL", "")
+        except Exception:
+            url = ""
     if not url:
         return
     marker = OUT / ".bundle_fetched"
     if marker.exists():
         return
     try:
-        import requests
-        with st.status("Downloading artifacts bundle…", expanded=False) as s:
-            r = requests.get(url, timeout=60)
+        with st.spinner("Downloading artifacts bundle…"):
+            r = requests.get(url, timeout=120, allow_redirects=True)
             r.raise_for_status()
             buf = io.BytesIO(r.content)
 
-            # Python 3.14 대비: filter 콜백 사용 + output/ 하위만 허용
-            def member_filter(ti: tarfile.TarInfo):
-                name = ti.name.lstrip("/").replace("..", "")
-                if not name.startswith("output/"):
-                    return None
-                ti.name = name
-                return ti
+            cache = ROOT / ".cache_bundle"
+            if cache.exists():
+                shutil.rmtree(cache)
+            cache.mkdir(parents=True, exist_ok=True)
 
             with tarfile.open(fileobj=buf, mode="r:gz") as tf:
-                tf.extractall(path=ROOT, filter=member_filter)
+                tf.extractall(path=cache)
 
-            marker.write_text("ok")
-            s.update(label="Artifacts fetched into ./output", state="complete")
+            # pick the deepest 'output/' dir in bundle
+            candidates = [pp for pp in cache.rglob("output") if pp.is_dir()]
+            if not candidates:
+                raise RuntimeError("No output/ directory found in bundle")
+            src_out = max(candidates, key=lambda pp: len(str(pp)))
+
+            for pp in src_out.rglob("*"):
+                rel = pp.relative_to(src_out)
+                dst = OUT / rel
+                if pp.is_dir():
+                    dst.mkdir(parents=True, exist_ok=True)
+                else:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.write_bytes(pp.read_bytes())
+
+            marker.write_text("ok", encoding="utf-8")
+        st.success("Artifacts fetched → ./output")
     except Exception as e:
-        # 절대 앱을 죽이지 않음
-        st.info(f"Bundle fetch skipped: {e}")
+        # never crash; just warn
+        st.warning(f"Bundle fetch skipped: {e}")
+
 
 # 절대 예외 전파하지 않도록 2중 보호
 try:
@@ -183,3 +210,42 @@ with tabs[3]:
             st.info(f"{p.name} (missing)")
 
 st.caption("Runs on real artifacts in ./output • If empty, set BUNDLE_URL (secret or env) to auto-fetch.")
+
+
+NAME_CANDIDATES = ["player_name","playerName","name","full_name","player","PlayerName"]
+
+def normalize_player_name_column(df):
+    import pandas as pd
+    if df is None or getattr(df, "empty", True):
+        return pd.DataFrame() if df is None else df
+    for c in NAME_CANDIDATES:
+        if c in df.columns:
+            if c != "player_name":
+                df = df.rename(columns={c:"player_name"})
+            break
+    else:
+        if "player_uid" in df.columns:
+            df["player_name"] = df["player_uid"].astype(str)
+        else:
+            df["player_name"] = ""
+    df["player_name"] = df["player_name"].fillna("").astype(str)
+    return df
+
+@st.cache_data(show_spinner=False)
+def load_cards():
+    import pandas as pd
+    paths = [OUT / "player_cards_enriched_all_seq.parquet", OUT / "player_cards_all.parquet"]
+    df = pd.DataFrame()
+    for path in paths:
+        if path.exists():
+            try:
+                df = pd.read_parquet(path, engine="pyarrow")
+            except Exception:
+                try:
+                    df = pd.read_parquet(path)
+                except Exception:
+                    df = pd.DataFrame()
+            if not df.empty:
+                break
+    return normalize_player_name_column(df)
+
