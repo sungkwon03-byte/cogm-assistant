@@ -1,4 +1,6 @@
-fastapi
-uvicorn[standard]
-python-dotenv
-pydantic
+streamlit==1.39.0
+duckdb==1.1.2
+pandas==2.2.2
+pyarrow==17.0.0
+matplotlib==3.10.3
+pillow==11.2.0
