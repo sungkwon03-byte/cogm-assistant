@@ -1,6 +1,6 @@
 streamlit==1.39.0
+pandas==2.2.3
 duckdb==1.1.2
-pandas==2.2.2
 pyarrow==17.0.0
-matplotlib==3.10.3
-pillow==11.2.0
+pillow==10.4.0          #  <== Streamlit 1.39 허용 상한에 맞춤 (<11)
+matplotlib==3.10.0
