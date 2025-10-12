@@ -18,6 +18,7 @@ for p in (OUT, REP, SUM, LOG):
 # 0) Bundle auto-fetch (optional)
 # -----------------------------
 
+
 def fetch_bundle_if_needed():
     url = os.environ.get("BUNDLE_URL") or st.secrets.get("BUNDLE_URL", "")
     if not url:
@@ -31,21 +32,19 @@ def fetch_bundle_if_needed():
         r = requests.get(url, timeout=60)
         r.raise_for_status()
         buf = io.BytesIO(r.content)
-        # output/ 하위 항목만 상대경로로 안전 추출
-        
-with tarfile.open(fileobj=buf, mode="r:gz") as tf:
-    # Python 3.14에서 기본 필터가 엄격해지므로 filter 콜백 사용
-    def member_filter(ti: tarfile.TarInfo):
-        # 경로 정규화 & 출구 제한
-        name = ti.name.lstrip("/").replace("..", "")
-        # output/ 하위만 허용
-        if not name.startswith("output/"):
-            return None
-        # 상대경로로 강제
-        ti.name = name
-        return ti
-    tf.extractall(path=ROOT, filter=member_filter)
-marker.write_text("ok")
+
+        # Python 3.14 대비: filter 콜백으로 output/만 안전 추출
+        def member_filter(ti: tarfile.TarInfo):
+            name = ti.name.lstrip("/").replace("..", "")
+            if not name.startswith("output/"):
+                return None
+            ti.name = name
+            return ti
+
+        with tarfile.open(fileobj=buf, mode="r:gz") as tf:
+            tf.extractall(path=ROOT, filter=member_filter)
+
+        marker.write_text("ok")
         st.success("Artifacts fetched into ./output")
     except Exception as e:
         st.warning(f"Bundle fetch skipped: {e}")
