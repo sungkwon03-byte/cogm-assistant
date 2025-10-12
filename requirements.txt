@@ -1,7 +1,7 @@
 streamlit==1.39.0
-pandas==2.2.2
-pyarrow==17.0.0
+pandas==2.2.3
+pyarrow==21.0.0      # Cloud에서 Py3.13 휠 有 → 빌드 도구 불필요
 duckdb==1.1.2
-matplotlib==3.10.3
-pillow==11.2.0
-requests==2.32.3
+matplotlib==3.10.0
+pillow==10.4.0       # streamlit 1.39 요구 <11
+requests==2.32.5
