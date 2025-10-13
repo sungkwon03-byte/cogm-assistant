@@ -1,4 +1,5 @@
-*.csv filter=lfs diff=lfs merge=lfs -text
-*.pdf filter=lfs diff=lfs merge=lfs -text
-*.parquet filter=lfs diff=lfs merge=lfs -text
-*.png filter=lfs diff=lfs merge=lfs -text
+# streamlit-demo: 대형 CSV/PNG 등 LFS 필터 비활성화
+*.csv -filter -diff -merge
+*.parquet -filter -diff -merge
+*.png -filter -diff -merge
+*.pdf -filter -diff -merge
