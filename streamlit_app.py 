@@ -1,0 +1,347 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+MLB Portfolio App — All-in-One (Real Data, No-Fail)
+- 실데이터: output/player_cards_all.parquet (1901–) + output/statcast_ultra_full_clean.parquet (2015–)
+- 요약/시각화: output/summaries/*, output/reports/*
+- 기능:
+  1) 데이터 상태 점검(실데이터 범위/행수)
+  2) 선수 검색(카드 기반, 최근 3년 트렌드 표/간단 라인)
+  3) 리포트 & 시각화 뷰어(플래툰, 약점 히트맵, EUZ, 트렌드카드)
+  4) PRO 트레이드 평가(실데이터 3년 복합점수: WAR, wRC+, EV, BB/K, AGE)
+- 모든 결함은 UI 경고로 처리, 앱은 절대 죽지 않음.
+"""
+
+import os, json, io, math, traceback
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import streamlit as st
+
+# ===== 경로 & 파일 =====
+ROOT = Path(".").resolve()
+OUT  = ROOT/"output"
+REP  = OUT/"reports"
+SUM  = OUT/"summaries"
+
+F_CARDS   = OUT/"player_cards_all.parquet"                # 1901–2014+ (Lahman/Chadwick card 계열)
+F_CARDS_EN= OUT/"player_cards_enriched_all_seq.parquet"   # 있으면 사용
+F_STAT    = OUT/"statcast_ultra_full_clean.parquet"       # 2015–2025 (Statcast)
+# 시각화/요약(있으면 노출)
+V_PLATOON_CSV = SUM/"platoon_split.csv"
+V_PLATOON_PNG = REP/"platoon_map.png"
+V_WEAK_CSV    = SUM/"weakness_heatmap_matrix.csv"
+V_WEAK_PNG    = REP/"weakness_heatmap.png"
+V_TREND_PDF   = REP/"trend_cards_3y.pdf"
+V_EUZ_CSV     = SUM/"euz_umpire_impact.csv"
+V_EUZ_PNG     = REP/"ump_euz.png"
+V_EXPLAIN_PNG = REP/"explainable_attribution_topN.png"
+R_AUTO_PDF    = REP/"auto_report_v2.pdf"
+R_LEG_PDF     = REP/"legacy_report_v2.pdf"
+
+st.set_page_config(page_title="MLB Portfolio (Real Data)", layout="wide")
+
+# ===== 공통 유틸 =====
+def _exists(p: Path) -> bool:
+    try: return p.exists()
+    except: return False
+
+@st.cache_data(show_spinner=False)
+def _read_parquet_safe(path: Path, columns: list[str] | None = None):
+    if not _exists(path):
+        return None, f"missing: {path}"
+    try:
+        df = pd.read_parquet(path, columns=columns)
+        return df, None
+    except Exception as e:
+        return None, f"read_parquet failed: {path.name} ({e})"
+
+def _safe_num(s):
+    return pd.to_numeric(s, errors="coerce")
+
+def _head(df, n=10):
+    try: return df.head(n)
+    except: return df
+
+def _fmt_int(v):
+    try: return f"{int(v):,}"
+    except: return "—"
+
+def _img(path: Path, caption: str):
+    if _exists(path):
+        st.image(str(path), caption=caption, use_container_width=True)
+    else:
+        st.info(f"파일 없음: {path.name}")
+
+def _pdf(url_or_path: Path, label: str):
+    if _exists(url_or_path):
+        with open(url_or_path, "rb") as f:
+            st.download_button(label=f"📄 {label} 다운로드", data=f.read(), file_name=url_or_path.name, mime="application/pdf")
+    else:
+        st.info(f"PDF 없음: {url_or_path.name}")
+
+# ===== 데이터 로더 =====
+@st.cache_data(show_spinner=False)
+def load_cards():
+    # enriched 우선, 없으면 기본
+    if _exists(F_CARDS_EN):
+        df, err = _read_parquet_safe(F_CARDS_EN)
+        if df is not None: return df
+    df, err = _read_parquet_safe(F_CARDS)
+    return df
+
+@st.cache_data(show_spinner=False)
+def load_statcast():
+    df, err = _read_parquet_safe(F_STAT)
+    return df
+
+# ===== 컬럼 동의어 매핑 =====
+def _first_col(df, candidates, default=None):
+    for c in candidates:
+        if c in df.columns: return c
+    return default
+
+def _cards_map(df):
+    return {
+        "name":   _first_col(df, ["player_name","name","PlayerName"], "player_name"),
+        "pid":    _first_col(df, ["player_id","mlbam_id","retro_id","playerid","key_bbref"], "player_id"),
+        "season": _first_col(df, ["season","Year","year"], "season"),
+        "team":   _first_col(df, ["team","Team","Tm"], None),
+        "pos":    _first_col(df, ["primary_pos","pos","position"], None),
+        "age":    _first_col(df, ["age","Age"], None),
+        "war":    _first_col(df, ["WAR","war","fWAR","bWAR","WAR3"], None),
+        "wrc":    _first_col(df, ["wRC_plus","wRC+","wrc_plus"], None),
+        "ev":     _first_col(df, ["EV","avg_ev","avg_exit_velocity","exit_velo"], None),
+        "bb":     _first_col(df, ["BB%","bb_rate","BB"], None),
+        "k":      _first_col(df, ["K%","k_rate","K"], None),
+        "pa":     _first_col(df, ["PA","pa"], None),
+    }
+
+# ===== 개요 섹션 =====
+def section_overview():
+    st.header("📦 데이터 개요 / 상태")
+    cdf = load_cards()
+    sdf = load_statcast()
+
+    colA, colB = st.columns(2)
+    with colA:
+        st.subheader("Cards (1901–)")
+        if cdf is None:
+            st.warning(f"{F_CARDS.name} / {F_CARDS_EN.name} 없음")
+        else:
+            cm = _cards_map(cdf)
+            seas = _safe_num(cdf[cm["season"]]) if cm["season"] in cdf.columns else pd.Series(dtype="float")
+            st.write({
+                "rows": _fmt_int(len(cdf)),
+                "season[min,max]": [seas.min(), seas.max()] if len(seas) else None,
+                "columns": len(cdf.columns)
+            })
+            st.dataframe(_head(cdf[[c for c in [cm["name"], cm["team"], cm["pos"], cm["season"], cm["war"], cm["wrc"], cm["ev"], cm["pa"]] if c in cdf.columns]].copy(), 15), use_container_width=True)
+
+    with colB:
+        st.subheader("Statcast (2015–)")
+        if sdf is None:
+            st.warning(f"{F_STAT.name} 없음")
+        else:
+            ycol = "year" if "year" in sdf.columns else ("game_year" if "game_year" in sdf.columns else None)
+            seas = _safe_num(sdf[ycol]) if ycol else pd.Series(dtype="float")
+            st.write({
+                "rows": _fmt_int(len(sdf)),
+                "year[min,max]": [seas.min(), seas.max()] if len(seas) else None,
+                "columns": len(sdf.columns)
+            })
+            st.dataframe(_head(sdf[[ycol] + [c for c in ["batter","pitcher","launch_speed","plate_x","plate_z"] if c in sdf.columns]].copy(), 15), use_container_width=True)
+
+# ===== 선수 검색 / 3y 트렌드 =====
+def _last_n(df, cm, pid, n=3):
+    s = cm["season"]
+    sl = df[df[cm["pid"]]==pid].copy()
+    if sl.empty: return sl
+    ymax = int(pd.to_numeric(sl[s], errors="coerce").max())
+    return sl[sl[s].between(ymax-n+1, ymax)]
+
+def section_player_search():
+    st.header("🔎 선수 검색 & 3년 트렌드")
+    cdf = load_cards()
+    if cdf is None:
+        st.warning("카드 데이터 부재")
+        return
+    cm = _cards_map(cdf)
+    # 이름 목록 (대형이면 상위 N개만)
+    names = cdf[cm["name"]].dropna().astype(str).value_counts().head(5000).index.tolist()
+    q = st.text_input("선수 이름(포함검색 가능)", value="Mookie Betts")
+    if not q:
+        st.info("선수명을 입력하세요.")
+        return
+    # 매칭
+    hit = cdf[cdf[cm["name"]].astype(str).str.contains(q, case=False, na=False)]
+    if hit.empty:
+        st.warning("일치 선수 없음")
+        return
+    pid = hit[cm["pid"]].value_counts().idxmax()
+    last3 = _last_n(cdf, cm, pid, 3)
+    st.write("**선수 식별**", {
+        "player_id": pid,
+        "player_name": hit[cm["name"]].iloc[0],
+        "seasons": list(last3[cm["season"]].astype("Int64")) if cm["season"] in last3.columns else None
+    })
+    # 표
+    cols_show = [c for c in [cm["season"], cm["team"], cm["pos"], cm["war"], cm["wrc"], cm["ev"], cm["bb"], cm["k"], cm["pa"], cm["age"]] if c in last3.columns]
+    if cols_show:
+        st.dataframe(last3[cols_show], use_container_width=True)
+    # 간단 라인(텍스트로)
+    def _mean(col):
+        return round(float(pd.to_numeric(last3.get(col, pd.Series(dtype='float')), errors="coerce").mean()),3) if col in last3.columns and len(last3) else None
+    st.write("**3y 평균**", {"WAR":_mean(cm["war"]), "wRC+":_mean(cm["wrc"]), "EV":_mean(cm["ev"]), "BB%":_mean(cm["bb"]), "K%":_mean(cm["k"])})
+
+# ===== 리포트 & 시각화 뷰어 =====
+def section_visuals_reports():
+    st.header("📊 리포트 & 시각화 뷰어 (실데이터 산출물)")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Platoon")
+        if _exists(V_PLATOON_PNG): _img(V_PLATOON_PNG, "Platoon map")
+        if _exists(V_PLATOON_CSV): st.download_button("CSV(platoon_split) 다운로드", V_PLATOON_CSV.read_bytes(), file_name=V_PLATOON_CSV.name)
+    with c2:
+        st.subheader("Weakness Heatmap")
+        if _exists(V_WEAK_PNG): _img(V_WEAK_PNG, "Weakness heatmap")
+        if _exists(V_WEAK_CSV): st.download_button("CSV(weakness_heatmap_matrix) 다운로드", V_WEAK_CSV.read_bytes(), file_name=V_WEAK_CSV.name)
+
+    c3, c4 = st.columns(2)
+    with c3:
+        st.subheader("Umpire EUZ")
+        if _exists(V_EUZ_PNG): _img(V_EUZ_PNG, "Umpire EUZ Impact")
+        if _exists(V_EUZ_CSV): st.download_button("CSV(euz_umpire_impact) 다운로드", V_EUZ_CSV.read_bytes(), file_name=V_EUZ_CSV.name)
+    with c4:
+        st.subheader("Explainable Attribution")
+        if _exists(V_EXPLAIN_PNG): _img(V_EXPLAIN_PNG, "Explainable TopN")
+
+    st.subheader("PDF Reports")
+    _pdf(V_TREND_PDF, "Trend Cards (3y)")
+    _pdf(R_AUTO_PDF,   "Auto Report v2")
+    _pdf(R_LEG_PDF,    "Legacy Report v2")
+
+# ===== PRO 트레이드 평가 (3년 복합) =====
+WEIGHTS = {
+    "WAR3": 0.55, "WRC3": 0.25, "EV3": 0.10, "AGE": -0.05, "VOL": 0.05
+}
+
+def _league_baselines(df, cm):
+    # 아주 간단한 전체 평균
+    def M(c, default):
+        return float(pd.to_numeric(df[c], errors="coerce").mean()) if c and c in df.columns else default
+    return {"WAR": M(cm["war"], 0.0), "WRC": M(cm["wrc"], 100.0), "EV": M(cm["ev"], 88.0),
+            "BB": M(cm["bb"], 8.0), "K": M(cm["k"], 22.0), "AGE": M(cm["age"], 28.0)}
+
+def _component_score(val, base, scale):
+    if val is None or pd.isna(val): return 0.0
+    return (val - base) / (scale if scale else 1.0)
+
+def _player_profile(cards, cm, name_query):
+    hit = cards[cards[cm["name"]].astype(str).str.contains(name_query, case=False, na=False)]
+    if hit.empty: return None, f"'{name_query}' 대상 없음"
+    pid = hit[cm["pid"]].value_counts().idxmax()
+    last3 = _last_n(cards, cm, pid, 3)
+    if last3.empty: return None, f"'{name_query}' 최근 3시즌 데이터 없음"
+    base = _league_baselines(cards, cm)
+
+    def mean_col(c): 
+        return float(pd.to_numeric(last3[c], errors="coerce").mean()) if c and c in last3.columns else np.nan
+    WAR3 = mean_col(cm["war"]); WRC3 = mean_col(cm["wrc"]); EV3 = mean_col(cm["ev"])
+    BB3  = mean_col(cm["bb"]);  K3   = mean_col(cm["k"]);   AGE3= mean_col(cm["age"])
+
+    sc_war = _component_score(WAR3, base["WAR"], 1.0) * WEIGHTS["WAR3"]
+    sc_wrc = _component_score(WRC3, base["WRC"], 10.0) * WEIGHTS["WRC3"]
+    sc_ev  = _component_score(EV3,  base["EV"],  2.5)  * WEIGHTS["EV3"]
+
+    sc_vol = 0.0
+    if not pd.isna(BB3): sc_vol += _component_score(BB3, base["BB"], 3.0)
+    if not pd.isna(K3):  sc_vol -= _component_score(K3, base["K"],  4.0)
+    sc_vol *= WEIGHTS["VOL"]
+
+    sc_age = 0.0
+    if not pd.isna(AGE3):
+        if AGE3 <= 24: sc_age = + (24-AGE3) * 0.05
+        if AGE3 >= 30: sc_age = - (AGE3-30) * 0.04
+    sc_age *= abs(WEIGHTS["AGE"])
+
+    total = float(sc_war + sc_wrc + sc_ev + sc_vol + sc_age)
+
+    profile = {
+        "player_id": pid,
+        "player_name": last3[cm["name"]].iloc[-1],
+        "seasons": list(last3[cm["season"]].astype("Int64")) if cm["season"] in last3.columns else None,
+        "WAR3": None if pd.isna(WAR3) else round(WAR3,3),
+        "WRC3": None if pd.isna(WRC3) else round(WRC3,3),
+        "EV3":  None if pd.isna(EV3)  else round(EV3,3),
+        "BB3":  None if pd.isna(BB3)  else round(BB3,3),
+        "K3":   None if pd.isna(K3)   else round(K3,3),
+        "AGE":  None if pd.isna(AGE3) else round(AGE3,1),
+        "score_components": {
+            "WAR3": round(sc_war,4), "WRC3": round(sc_wrc,4), "EV": round(sc_ev,4),
+            "VOL": round(sc_vol,4), "AGE": round(sc_age,4)
+        },
+        "score_total": round(total,4)
+    }
+    return profile, None
+
+def section_trade_pro():
+    st.header("🔁 Trade Evaluator — PRO (Real 3Y Composite)")
+    cards = load_cards()
+    if cards is None:
+        st.warning("카드 데이터 부재")
+        return
+    cm = _cards_map(cards)
+    c1, c2 = st.columns(2)
+    with c1:
+        ta = st.text_area("Team A players (comma or newline)", value="Mookie Betts\nFreddie Freeman")
+    with c2:
+        tb = st.text_area("Team B players (comma or newline)", value="Aaron Judge\nJuan Soto")
+    if st.button("Evaluate Trade"):
+        def team_score(txt):
+            names = [x.strip() for x in txt.replace("\n",",").split(",") if x.strip()]
+            profs, errs = [], []
+            for nm in names:
+                p, err = _player_profile(cards, cm, nm)
+                if err: errs.append(f"{nm}: {err}")
+                else:  profs.append(p)
+            total = round(sum(p["score_total"] for p in profs),4) if profs else 0.0
+            return profs, total, errs
+
+        A, As, Ae = team_score(ta)
+        B, Bs, Be = team_score(tb)
+        st.write("### Team Scores", {"TeamA": As, "TeamB": Bs, "Δ(A-B)": round(As-Bs,4)})
+        if A: st.write("**Team A**"); st.json({p["player_name"]: p for p in A})
+        if B: st.write("**Team B**"); st.json({p["player_name"]: p for p in B})
+        if Ae or Be: st.warning(" / ".join(Ae+Be))
+
+# ===== 메인 탭 =====
+def main():
+    st.title("MLB Portfolio — Real Data (1901–2025)")
+
+    tabs = st.tabs(["1) 개요", "2) 선수 검색", "3) 리포트·시각화", "4) PRO 트레이드"])
+    with tabs[0]:
+        try: section_overview()
+        except Exception:
+            st.error("개요 섹션 오류")
+            st.code(traceback.format_exc())
+    with tabs[1]:
+        try: section_player_search()
+        except Exception:
+            st.error("선수 검색 섹션 오류")
+            st.code(traceback.format_exc())
+    with tabs[2]:
+        try: section_visuals_reports()
+        except Exception:
+            st.error("리포트/시각화 섹션 오류")
+            st.code(traceback.format_exc())
+    with tabs[3]:
+        try: section_trade_pro()
+        except Exception:
+            st.error("트레이드 섹션 오류")
+            st.code(traceback.format_exc())
+
+    st.caption("데이터 소스: Statcast(2015–), Lahman/Chadwick 계열 카드(1901–). 모든 계산은 실데이터 기반이며, 누락 컬럼은 0 기여로 방어적으로 처리합니다.")
+
+if __name__ == "__main__":
+    main()
