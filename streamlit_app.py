@@ -6,7 +6,18 @@ st.set_page_config(page_title="Co-GM Assistant", layout="wide")
 st.title("⚾ Co-GM Assistant — Streamlit Portfolio Version")
 st.caption("실데이터 기반 리포트 · 시각화 · 트레이드 점수 엔진")
 
-OUT = Path("output")
+import os, urllib.request, tarfile, io
+OUT=Path("output")
+BUNDLE_URL=os.environ.get("BUNDLE_URL","")
+if (not OUT.exists() or not any(OUT.glob("*"))) and BUNDLE_URL:
+    try:
+        print("[bootstrap] fetching:", BUNDLE_URL)
+        data=urllib.request.urlopen(BUNDLE_URL, timeout=60).read()
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+            tf.extractall(path=OUT)
+        print("[bootstrap] extracted to output/")
+    except Exception as e:
+        print("[bootstrap] failed:", e)
 DATA_FILES = list(OUT.glob("*.csv"))
 
 if not OUT.exists() or len(DATA_FILES) == 0:
