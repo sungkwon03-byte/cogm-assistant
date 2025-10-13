@@ -1,88 +1,245 @@
+# streamlit_app.py — Portfolio + Real Data (reports kept, player+trade added)
 import streamlit as st
-import pandas as pd
+import duckdb, pandas as pd, numpy as np
 from pathlib import Path
+from PIL import Image, UnidentifiedImageError
 
-st.set_page_config(page_title="Co-GM Assistant", layout="wide")
+st.set_page_config(page_title="Co-GM Assistant — Streamlit", layout="wide")
 st.title("⚾ Co-GM Assistant — Streamlit Portfolio Version")
-st.caption("실데이터 기반 리포트 · 시각화 · 트레이드 점수 엔진")
+st.caption("리포트/비주얼 유지 + 선수 실데이터 검색 + 트레이드 평가")
 
-import os, urllib.request, tarfile, io
-OUT=Path("output")
-BUNDLE_URL=os.environ.get("BUNDLE_URL","")
-if (not OUT.exists() or not any(OUT.glob("*"))) and BUNDLE_URL:
+ROOT = Path(__file__).parent
+OUT = ROOT / "output"
+REP = OUT / "reports"
+SUM = OUT / "summaries"
+
+STATCAST = OUT / "statcast_ultra_full_clean.parquet"
+CARDS    = OUT / "player_cards_all.parquet"
+
+# ---------- helpers ----------
+def list_images(folder: Path):
+    if not folder.exists(): return []
+    imgs = []
+    for p in sorted(folder.iterdir()):
+        if not p.is_file(): continue
+        if p.suffix.lower() not in {".png",".jpg",".jpeg",".webp",".gif"}: continue
+        try:
+            # LFS pointer guard
+            head = p.read_bytes()[:64]
+            if head.startswith(b"version https://git-lfs.github.com"):
+                continue
+        except Exception:
+            continue
+        try:
+            with Image.open(p) as im:
+                im.verify()
+            if p.stat().st_size > 200:
+                imgs.append(p)
+        except Exception:
+            continue
+    return imgs
+
+def list_pdfs(folder: Path):
+    if not folder.exists(): return []
+    return [p for p in sorted(folder.glob("*.pdf")) if p.stat().st_size > 400]
+
+NAME_CANDS = ["player_name","name","full_name","batter_name","pitcher_name","player","Player","Name"]
+ID_CANDS   = ["player_id","mlbam_id","mlbamid","batter","pitcher","id","player_uid"]
+
+def pick_col(cols, cand_list):
+    for c in cand_list:
+        if c in cols: return c
+        # case-insensitive fallback
+        for x in cols:
+            if x.lower()==c.lower(): return x
+    return None
+
+def load_cards_sample(limit=300000):
+    if not CARDS.exists(): return None
+    con = duckdb.connect()
     try:
-        print("[bootstrap] fetching:", BUNDLE_URL)
-        data=urllib.request.urlopen(BUNDLE_URL, timeout=60).read()
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
-            tf.extractall(path=OUT)
-        print("[bootstrap] extracted to output/")
-    except Exception as e:
-        print("[bootstrap] failed:", e)
-DATA_FILES = list(OUT.glob("*.csv"))
+        # Load only a few useful columns if present
+        rel = con.sql(f"""
+            SELECT * FROM read_parquet('{CARDS.as_posix()}')
+            LIMIT {limit}
+        """).df()
+        return rel
+    finally:
+        con.close()
 
-if not OUT.exists() or len(DATA_FILES) == 0:
-    st.error("❌ output/ 폴더가 비어 있습니다. 실데이터를 넣어주세요.")
-    st.stop()
+def load_statcast_sample(limit=300000):
+    if not STATCAST.exists(): return None
+    con = duckdb.connect()
+    try:
+        rel = con.sql(f"""
+            SELECT * FROM read_parquet('{STATCAST.as_posix()}')
+            LIMIT {limit}
+        """).df()
+        return rel
+    finally:
+        con.close()
 
-tab1, tab2, tab3 = st.tabs(["📊 Player Data", "📈 Visuals", "🔁 Trade Simulator"])
+def build_value_table():
+    # Try rich value first
+    paths = [
+        SUM/"role_fit_suggestions.csv",
+        SUM/"player_value.csv",
+        SUM/"leaderboard_entropy_top10.csv",  # fallback-ish
+    ]
+    for p in paths:
+        if p.exists():
+            try:
+                df = pd.read_csv(p)
+                return df
+            except Exception:
+                continue
+    return None
 
-# -------------------
-# Tab 1: Player Data
-# -------------------
-with tab1:
-    st.header("Player Cards & Stats")
-    csvs = [f.name for f in DATA_FILES if "player" in f.name.lower()]
-    if csvs:
-        file_sel = st.selectbox("파일 선택", sorted(csvs))
-        df = pd.read_csv(OUT / file_sel)
-        st.dataframe(df.head(100), use_container_width=True)
+# ---------- tabs ----------
+tab_ov, tab_player, tab_visuals, tab_trade = st.tabs(
+    ["Overview", "Player Search", "Visuals", "Trade Simulator"]
+)
+
+# ========== Overview ==========
+with tab_ov:
+    st.subheader("Data Overview")
+    files = []
+    if CARDS.exists():
+        try:
+            cards_cols = duckdb.sql(f"SELECT * FROM read_parquet('{CARDS.as_posix()}') LIMIT 0").df().columns.tolist()
+            cnt = duckdb.sql(f"SELECT count(*) c FROM read_parquet('{CARDS.as_posix()}')").df()["c"][0]
+            files.append(("player_cards_all.parquet", int(cnt), ", ".join(cards_cols[:8])))
+        except Exception:
+            files.append(("player_cards_all.parquet", "?", "(columns read failed)"))
+    if STATCAST.exists():
+        try:
+            sc_cols = duckdb.sql(f"SELECT * FROM read_parquet('{STATCAST.as_posix()}') LIMIT 0").df().columns.tolist()
+            cnt = duckdb.sql(f"SELECT count(*) c FROM read_parquet('{STATCAST.as_posix()}')").df()["c"][0]
+            files.append(("statcast_ultra_full_clean.parquet", int(cnt), ", ".join(sc_cols[:8])))
+        except Exception as e:
+            st.warning(f"Failed to read statcast: {e}")
+            files.append(("statcast_ultra_full_clean.parquet", 0, "(read error)"))
+    st.dataframe(pd.DataFrame(files, columns=["file","rows","columns"]), use_container_width=True)
+
+# ========== Player Search ==========
+with tab_player:
+    st.subheader("Player Search (partial OK)")
+    q = st.text_input("선수 이름 또는 ID (부분 문자열 가능)", "")
+    if "player_df" not in st.session_state:
+        # load source preference: cards -> statcast
+        src = load_cards_sample(limit=800000)
+        if src is None:
+            src = load_statcast_sample(limit=800000)
+        st.session_state["player_df"] = src
+
+    df = st.session_state.get("player_df")
+    if df is None:
+        st.error("사용 가능한 플레이어 소스가 없습니다. `output/player_cards_all.parquet` 또는 `output/statcast_ultra_full_clean.parquet`가 필요합니다.")
     else:
-        st.warning("player 관련 CSV 파일을 찾을 수 없습니다. (예: player_cards.csv)")
+        cols = list(df.columns)
+        name_col = pick_col(cols, NAME_CANDS)
+        id_col   = pick_col(cols, ID_CANDS)
 
-# -------------------
-# Tab 2: Visuals
-# -------------------
-with tab2:
-    st.header("Performance Visualizations")
-    pngs = sorted(list(OUT.glob("*.png")))
-    pdfs = sorted(list(OUT.glob("*.pdf")))
-    cols = st.columns(2)
-    shown = 0
-    for img in pngs:
-        cols[shown % 2].image(str(img), caption=img.name, use_container_width=True)
-        shown += 1
-    if shown == 0 and pdfs:
-        st.info("PNG가 없으면 PDF를 다운로드로 제공합니다.")
-        for pdf in pdfs[:4]:
-            st.download_button(label=f"📄 {pdf.name}", file_name=pdf.name, data=open(pdf, "rb"))
+        with st.expander("Detected columns / mapping", expanded=False):
+            st.write({"name_col": name_col, "id_col": id_col, "total_rows": len(df)})
 
-# -------------------
-# Tab 3: Trade Simulator
-# -------------------
-with tab3:
-    st.header("Trade Value Comparison")
-    trade_file = next((f for f in DATA_FILES if "trade" in f.name.lower()), None)
-    if trade_file:
-        trade_df = pd.read_csv(trade_file)
-        # 기대 컬럼: player_name, trade_value
-        if not {"player_name","trade_value"}.issubset(trade_df.columns):
-            st.error("trade_value.csv에 'player_name', 'trade_value' 컬럼이 필요합니다.")
+        if not name_col and not id_col:
+            st.warning("이 데이터셋에서 이름/ID 컬럼을 찾지 못했습니다. 최소 하나는 포함되어야 합니다.")
         else:
-            player_names = trade_df["player_name"].dropna().astype(str).unique().tolist()
-            col1, col2 = st.columns(2)
-            with col1:
-                p1 = st.selectbox("선수 1", player_names, index=0 if player_names else None, key="p1")
-            with col2:
-                p2 = st.selectbox("선수 2", player_names, index=1 if len(player_names)>1 else 0, key="p2")
-            if st.button("🔁 Compare Trade Value"):
-                v1 = trade_df.loc[trade_df["player_name"] == p1, "trade_value"].astype(float).mean()
-                v2 = trade_df.loc[trade_df["player_name"] == p2, "trade_value"].astype(float).mean()
-                if pd.notna(v1) and pd.notna(v2):
-                    diff = v1 - v2
-                    st.metric(label=f"{p1} vs {p2}", value=f"{diff:+.2f}")
-                else:
-                    st.warning("선택한 선수의 트레이드 값이 없습니다.")
-    else:
-        st.info("trade_value.csv 파일을 output 폴더에 추가하면 시뮬레이터가 활성화됩니다.")
+            if q.strip():
+                mask = pd.Series([False]*len(df))
+                if name_col:
+                    mask = mask | df[name_col].astype(str).str.contains(q, case=False, na=False)
+                if id_col and q.strip().isdigit():
+                    mask = mask | (df[id_col].astype(str)==q.strip())
+                hits = df.loc[mask].copy()
+                # show a compact subset
+                show_cols = []
+                for c in [name_col, id_col, "season","team","teamName","league","pos","position"]:
+                    if c and c in cols and c not in show_cols:
+                        show_cols.append(c)
+                # pad with a few numeric metrics if available
+                for c in ["war","fwar","bwar","wrc_plus","ops_plus","pa","ip"]:
+                    if c in cols and c not in show_cols:
+                        show_cols.append(c)
+                st.write(f"검색 결과: {len(hits)}")
+                st.dataframe(hits[show_cols].head(200), use_container_width=True)
+            else:
+                st.info("이름 일부(예: *ohtani*, *judge* ) 또는 MLBAM ID를 입력하세요.")
 
-st.success("✅ 모든 모듈 로드 완료. Streamlit Cloud에서 바로 실행 가능합니다.")
+# ========== Visuals ==========
+with tab_visuals:
+    st.subheader("Visuals")
+    imgs = list_images(REP)
+    pdfs = list_pdfs(REP)
+    if not imgs and not pdfs:
+        st.info("`output/reports/` 폴더에 이미지(PNG/JPG) 또는 PDF를 넣으면 자동으로 표시됩니다.")
+    colA, colB = st.columns(2)
+    shown = 0
+    for p in imgs:
+        try:
+            col = colA if (shown % 2)==0 else colB
+            col.image(p.read_bytes(), caption=p.name, use_container_width=True)
+            shown += 1
+        except (UnidentifiedImageError, OSError):
+            continue
+    if pdfs:
+        st.divider()
+        st.write("📄 PDF Reports")
+        sel = st.selectbox("다운로드", [p.name for p in pdfs])
+        st.download_button("다운로드", data=(REP/sel).read_bytes(), file_name=sel, mime="application/pdf")
+
+# ========== Trade Simulator ==========
+with tab_trade:
+    st.subheader("Trade Simulator (portfolio mode)")
+    st.caption("가치표 CSV가 있으면 실제 점수로 계산, 없으면 간이 방식 사용")
+
+    value_df = build_value_table()
+    if value_df is not None:
+        # try to standardize
+        cols = value_df.columns
+        name_col = pick_col(cols, NAME_CANDS) or pick_col(cols, ["player","player_name"])
+        id_col   = pick_col(cols, ID_CANDS)
+        score_col = pick_col(cols, ["score","value","trade_score","fit_score","overall","rating"])
+        st.write(f"가치표: rows={len(value_df)}, name={name_col}, id={id_col}, score={score_col}")
+
+    left, right = st.columns(2)
+    with left:
+        out_txt = st.text_area("보내는 선수들 (줄바꿈 구분)", height=120, placeholder="ohtani\nsoto\n...")
+    with right:
+        in_txt = st.text_area("받는 선수들 (줄바꿈 구분)", height=120, placeholder="carroll\nacuna\n...")
+
+    def parse_list(s):
+        arr = [x.strip() for x in s.splitlines() if x.strip()]
+        return arr[:50]
+
+    if st.button("시뮬레이션 실행", type="primary"):
+        outs = parse_list(out_txt)
+        ins  = parse_list(in_txt)
+        if value_df is not None and (name_col or id_col) and score_col:
+            # sum scores by best matching on name (case-insensitive contains) or exact id
+            def sum_score(names):
+                tot = 0.0
+                for n in names:
+                    mask = pd.Series([False]*len(value_df))
+                    if id_col and n.isdigit():
+                        mask = mask | (value_df[id_col].astype(str)==n)
+                    if name_col:
+                        mask = mask | value_df[name_col].astype(str).str.contains(n, case=False, na=False)
+                    sub = value_df.loc[mask]
+                    if not sub.empty:
+                        tot += float(np.nanmean(pd.to_numeric(sub[score_col], errors="coerce")))
+                return tot
+            out_score = sum_score(outs)
+            in_score  = sum_score(ins)
+        else:
+            # fallback: simple heuristic (length-based dummy)
+            out_score = sum([max(1, len(x)//3) for x in outs])
+            in_score  = sum([max(1, len(x)//3) for x in ins])
+
+        net = in_score - out_score
+        verdict = "✅ 유리함" if net>0 else ("⚖️ 비슷함" if net==0 else "❌ 불리함")
+        st.success(f"Trade Score: incoming {in_score:.2f} − outgoing {out_score:.2f} = **{net:.2f}** → {verdict}")
+
+st.divider()
+st.caption("Build keeps legacy visuals; adds robust player search & trade scoring with real data if available.")
