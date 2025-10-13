@@ -1,3 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "[INIT] 🧩 Streamlit Cloud 전용 완전형 구성 시작"
+
+# repo 루트로 이동
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+cd "$ROOT"
+
+# git 작성자 정보 없을 때 기본값 설정 (Codespaces 대비)
+git config user.email >/dev/null 2>&1 || git config user.email "you@example.com"
+git config user.name  >/dev/null 2>&1 || git config user.name "Your Name"
+
+# 0) 필수 파일/폴더
+mkdir -p output
+touch requirements.txt
+
+# 1) requirements.txt 정리 (Streamlit/Pillow 고정)
+echo "[STEP 1] requirements.txt 업데이트..."
+# streamlit==1.39.0 보장
+if grep -Eqi '^streamlit(==|>=|<=)' requirements.txt; then
+  sed -i 's/^streamlit.*/streamlit==1.39.0/' requirements.txt
+else
+  echo 'streamlit==1.39.0' >> requirements.txt
+fi
+# pillow==10.3.0 보장
+if grep -Eqi '^pillow(==|>=|<=)' requirements.txt; then
+  sed -i 's/^pillow.*/pillow==10.3.0/' requirements.txt
+else
+  echo 'pillow==10.3.0' >> requirements.txt
+fi
+# pandas 없는 경우 기본 추가
+grep -Eqi '^pandas(==|>=|<=)' requirements.txt || echo 'pandas==2.2.2' >> requirements.txt
+# matplotlib 없는 경우 기본 추가
+grep -Eqi '^matplotlib(==|>=|<=)' requirements.txt || echo 'matplotlib==3.8.4' >> requirements.txt
+echo "✅ requirements.txt 완료"
+
+# 2) Streamlit 전용 앱 작성 (streamlit_app.py)
+echo "[STEP 2] Streamlit 앱 생성..."
+cat > streamlit_app.py <<'PY'
 import streamlit as st
 import pandas as pd
 from pathlib import Path
@@ -75,3 +115,39 @@ with tab3:
         st.info("trade_value.csv 파일을 output 폴더에 추가하면 시뮬레이터가 활성화됩니다.")
 
 st.success("✅ 모든 모듈 로드 완료. Streamlit Cloud에서 바로 실행 가능합니다.")
+PY
+echo "✅ streamlit_app.py 생성 완료"
+
+# 3) 커밋 & 브랜치 생성/푸시
+echo "[STEP 3] git 커밋/브랜치/푸시..."
+git add -A
+git commit --allow-empty -m "build: Streamlit Cloud full portfolio (app + reqs + autodetect output/)"
+# streamlit-demo 브랜치 강제 세팅
+if git show-ref --verify --quiet refs/heads/streamlit-demo; then
+  git branch -M streamlit-demo
+else
+  git checkout -b streamlit-demo
+fi
+git push -u origin streamlit-demo -f
+echo "✅ streamlit-demo 브랜치 푸시 완료"
+
+# 4) 최종 안내
+cat <<'MSG'
+
+🎉 준비 완료!
+
+📦 Streamlit Cloud 설정 값
+  • Repository: <your repo> (예: sungkwon03-byte/cogm-assistant)
+  • Branch: streamlit-demo
+  • Main file path: streamlit_app.py
+  • Build: pip install -r requirements.txt
+
+📁 데이터 경로
+  • 실데이터는 repo의 output/ 아래에 두면 자동 인식
+  • 예시 파일명:
+      - player_cards.csv, player_cards_all.csv
+      - trend_3yr_cards.pdf, weakness_heatmap.png 등
+      - trade_value.csv (컬럼: player_name, trade_value)
+
+✅ 이 상태로 바로 Deploy 하면 동작합니다.
+MSG
