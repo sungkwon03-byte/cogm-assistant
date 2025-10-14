@@ -1,0 +1,2 @@
+[SANITIZE] start 20251013T142236Z  OUT=/workspaces/cogm-assistant/some/dir
+[CHECK] OUT exists: True

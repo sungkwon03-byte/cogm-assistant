@@ -1,0 +1,3 @@
+[SANITIZE] start 20251013T142721Z  OUT=/workspaces/cogm-assistant/some/dir
+[CHECK] OUT exists: True
+[MOVE] /workspaces/cogm-assistant/some/dir/.quarantine/sanitize_20251013T142236Z.log -> /workspaces/cogm-assistant/some/dir/.quarantine/20251013T142721Z/.quarantine/sanitize_20251013T142236Z.log :: unwanted extension

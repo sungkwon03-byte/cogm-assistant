@@ -1,0 +1,6 @@
+[SANITIZE] start 20251013T142031Z
+[CHECK] IMG_DIR=False PDF_DIR=False CSV_DIR=False
+[SANITIZE] done
+---- kept (top) ----
+---- quarantined ----
+total 0

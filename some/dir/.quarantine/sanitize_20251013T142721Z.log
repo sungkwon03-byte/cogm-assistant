@@ -1,0 +1,7 @@
+[MOVE] /workspaces/cogm-assistant/some/dir/.quarantine/sanitize_20251013T142721Z.log -> /workspaces/cogm-assistant/some/dir/.quarantine/20251013T142721Z/.quarantine/sanitize_20251013T142721Z.log :: unwanted extension
+[MOVE] /workspaces/cogm-assistant/some/dir/.quarantine/20251013T142236Z/.quarantine/sanitize_20251013T142236Z.log -> /workspaces/cogm-assistant/some/dir/.quarantine/20251013T142721Z/.quarantine/20251013T142236Z/.quarantine/sanitize_20251013T142236Z.log :: unwanted extension
+[SANITIZE] done
+---- kept (top) ----
+total 0
+---- quarantined ----
+total 0
