@@ -1,0 +1,80 @@
+{
+  "generated_at": "2025-10-11T01:13:24.155332+00:00",
+  "trades": [
+    {
+      "season": 2025,
+      "from_team": "TEAM_A",
+      "to_team": "TEAM_B",
+      "offer": {
+        "pitcher_id": "681460",
+        "value": 2.0927314338559055
+      },
+      "ask": {
+        "pitcher_id": "681508",
+        "value": 2.0627320459037257
+      },
+      "delta_value": 0.029999387952179823,
+      "status": "prototype"
+    },
+    {
+      "season": 2025,
+      "from_team": "TEAM_A",
+      "to_team": "TEAM_B",
+      "offer": {
+        "pitcher_id": "595777",
+        "value": 2.0264096686680935
+      },
+      "ask": {
+        "pitcher_id": "650489",
+        "value": 2.010407470915774
+      },
+      "delta_value": 0.016002197752319258,
+      "status": "prototype"
+    },
+    {
+      "season": 2025,
+      "from_team": "TEAM_A",
+      "to_team": "TEAM_B",
+      "offer": {
+        "pitcher_id": "671221",
+        "value": 2.0053506339311986
+      },
+      "ask": {
+        "pitcher_id": "606466",
+        "value": 2.0049617482090785
+      },
+      "delta_value": 0.00038888572212014694,
+      "status": "prototype"
+    },
+    {
+      "season": 2025,
+      "from_team": "TEAM_A",
+      "to_team": "TEAM_B",
+      "offer": {
+        "pitcher_id": "664023",
+        "value": 1.9854118731453463
+      },
+      "ask": {
+        "pitcher_id": "672761",
+        "value": 1.9845485676487937
+      },
+      "delta_value": 0.0008633054965525577,
+      "status": "prototype"
+    },
+    {
+      "season": 2025,
+      "from_team": "TEAM_A",
+      "to_team": "TEAM_B",
+      "offer": {
+        "pitcher_id": "668939",
+        "value": 1.9845485676487937
+      },
+      "ask": {
+        "pitcher_id": "645277",
+        "value": 1.983967384353486
+      },
+      "delta_value": 0.0005811832953077634,
+      "status": "prototype"
+    }
+  ]
+}

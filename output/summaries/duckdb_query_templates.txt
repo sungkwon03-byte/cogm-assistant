@@ -1,0 +1,17 @@
+-- DuckDB quick templates
+
+-- n-gram
+-- SELECT * FROM read_parquet('output/summaries/pitch_ngram2.parquet')
+-- WHERE season=2025 AND pitcher_id='######' ORDER BY n DESC LIMIT 20;
+
+-- run-length
+-- SELECT run_len, COUNT(*) c FROM read_parquet('output/summaries/pitch_runlength.parquet')
+-- WHERE season=2025 AND pitcher_id='######' GROUP BY 1 ORDER BY 1;
+
+-- count transition (if available)
+-- SELECT * FROM read_parquet('output/summaries/pitch_transition.parquet')
+-- WHERE season=2025 AND balls=1 AND strikes=2 ORDER BY n DESC LIMIT 30;
+
+-- team-season (if available)
+-- SELECT * FROM read_parquet('output/summaries/team_season_agg.parquet')
+-- WHERE season=2025 ORDER BY usage_entropy DESC LIMIT 10;

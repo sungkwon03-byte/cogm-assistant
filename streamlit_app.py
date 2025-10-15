@@ -4,6 +4,16 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib
+
+# --- robust parquet reader: pandas -> duckdb fallback ---
+def read_parquet_robust(path):
+    import pandas as _pd
+    try:
+        return _read_parquet_robust(path)
+    except Exception:
+        import duckdb as _dd
+        # DuckDB reads parquet natively; return pandas DataFrame
+        return _dd.query(f"SELECT * FROM read_parquet('{path}')").to_df()
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pipeline.surplus_calc import get_trade_value_score

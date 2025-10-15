@@ -1,0 +1,119 @@
+{
+  "paths": {
+    "master": "/workspaces/cogm-assistant/output/statcast_ultra_full_clean.parquet",
+    "summaries_dir": "/workspaces/cogm-assistant/output/summaries",
+    "reports_dir": "/workspaces/cogm-assistant/output/reports"
+  },
+  "coverage": {
+    "rows_in_master": 2134958,
+    "min_year": 2015,
+    "max_year": 2025,
+    "has_2025": true
+  },
+  "artefacts": {
+    "pitcher_season_summary": true,
+    "ngram2": true,
+    "ngram3": true,
+    "run_length": true,
+    "count_transition": true,
+    "zone_repeat_transition": true,
+    "batter_la_ev_variability": true,
+    "leaderboards": true,
+    "feat_2025": true,
+    "cards_any": true,
+    "cards_enriched_any": true,
+    "mart_1901_2014_span_ok": true,
+    "mock_trade": true,
+    "schedule_summary": true,
+    "schedule_plot": true,
+    "compare_spider_assets": true,
+    "trend_3y_assets": true,
+    "count_pitchtype_profile": true,
+    "weakness_heatmap_assets": true,
+    "hotcold_stability": true,
+    "euz_umpire_impact": true,
+    "trade_value_board": true,
+    "trade_engine_logs": true,
+    "explainable_attribution": true,
+    "idmap_unified": true
+  },
+  "sections": {
+    "A": {
+      "single": true,
+      "compare_2_3": true,
+      "trend_3y": true,
+      "count_pitchtype_profile": true,
+      "weakness_heatmap": true,
+      "batted_ball_profile": true,
+      "hot_cold_stability": true,
+      "injury_signal": true,
+      "role_fit": true,
+      "position_change": true,
+      "intl_transfer": true
+    },
+    "B": {
+      "payroll": true,
+      "arb": true,
+      "roi": true,
+      "pos_repl": true,
+      "40man": true,
+      "IL": true,
+      "contract_compare": true,
+      "CBA_QA": true,
+      "agent_history": false
+    },
+    "C": {
+      "trade_value": true,
+      "mock_trade": true,
+      "team_fit": false,
+      "FA_forecast": false,
+      "waiver_rule5": false,
+      "mock_draft": true,
+      "intl_FA": false
+    },
+    "D": {
+      "schedule": true,
+      "lineup": false,
+      "ingame_leverage": false,
+      "ump_euz": true,
+      "park_daily": true,
+      "travel_fatigue": false,
+      "winprob": true
+    },
+    "E": {
+      "news_digest": true,
+      "prev_game": false,
+      "weekly_ops": false,
+      "scouting_tpl": false,
+      "evidence_tbl": false,
+      "conversational_specs": false
+    },
+    "F": {
+      "posting_rules": true,
+      "bonus_pool": false,
+      "kbo_parity": false,
+      "league_convert": true
+    },
+    "G": {
+      "watchlist": true,
+      "decision_log": true,
+      "multi_season_planner": true,
+      "player_dev": false,
+      "explainable": true,
+      "rbac": false,
+      "id_mapping": true
+    },
+    "H": {
+      "teams_ext": false,
+      "multi_compare_rank": true,
+      "batter_adv": true,
+      "pitcher_adv": true,
+      "league_env": true,
+      "auto_report": false,
+      "pluggable_etl": true
+    }
+  },
+  "notes": [
+    "missing mart samples: 13"
+  ]
+}

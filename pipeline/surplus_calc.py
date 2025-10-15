@@ -3,6 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 
+# --- robust parquet reader: pandas -> duckdb fallback ---
+def read_parquet_robust(path):
+    import pandas as _pd
+    try:
+        return _read_parquet_robust(path)
+    except Exception:
+        import duckdb as _dd
+        # DuckDB reads parquet natively; return pandas DataFrame
+        return _dd.query(f"SELECT * FROM read_parquet('{path}')").to_df()
+
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "output"
 CARDS_ENR = OUT / "player_cards_enriched_all_seq.parquet"
@@ -14,7 +24,7 @@ NAME_COL_PREF = ["player_name","mlb_name","name","full_name"]
 def _load_cards() -> pd.DataFrame:
     for p in [CARDS_ENR, CARDS]:
         if p.exists():
-            try: return pd.read_parquet(p)
+            try: return read_parquet_robust(p)
             except Exception: pass
     for p in [OUT/"player_cards_enriched_full.csv", OUT/"player_cards_ultra.csv", OUT/"player_cards_all.csv"]:
         if p.exists():
