@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: cogm-assistant
+    env: python
+    buildCommand: |
+      echo "Python version: $(python --version)"
+      pip install --upgrade pip setuptools wheel
+      pip install -r requirements.txt --prefer-binary
+    startCommand: bash tools/render_boot.sh
+    build:
+      environment:
+        pythonVersion: 3.11.8
