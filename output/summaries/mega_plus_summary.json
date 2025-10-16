@@ -1,0 +1,27 @@
+{
+  "attached": {
+    "player_cards_tbl": false,
+    "statcast_tbl": false,
+    "id_map_tbl": false
+  },
+  "created": [
+    "exports",
+    "pit_mix_by_count"
+  ],
+  "features_status": {
+    "game_predictor": "blocked",
+    "season_predictor": "blocked",
+    "lineup_optimizer": "blocked",
+    "pitch_count_viz": "blocked",
+    "batter_weakmap": "blocked",
+    "platoon_auto": "blocked",
+    "team_power_rank": "blocked",
+    "percentile_cards": "blocked",
+    "trade_value_plus": "blocked",
+    "doctor2": "blocked",
+    "winprob_graph": "blocked",
+    "rolling_playoff": "blocked",
+    "war_delta_heat": "blocked",
+    "postgame_report": "blocked"
+  }
+}
