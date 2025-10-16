@@ -1,3 +1,4 @@
+from app.lib.name_resolver import resolve_names
 # app/main.py  — stable rebuild (OPS+/ERA+, caching, trends)
 
 from __future__ import annotations

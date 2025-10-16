@@ -1,3 +1,4 @@
+from app.lib.name_resolver import resolve_names
 import os
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware

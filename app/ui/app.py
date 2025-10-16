@@ -1,3 +1,4 @@
+from app.lib.name_resolver import resolve_names
 import os, requests, streamlit as st
 import pandas as pd
 
