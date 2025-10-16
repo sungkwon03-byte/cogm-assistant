@@ -11,3 +11,6 @@ ok = len(val) >= 64 and re.fullmatch(r"[A-Za-z0-9_\-]+", val) is not None
 print("APP_SECRET_KEY:", "OK" if ok else "INVALID")
 sys.exit(0 if ok else 1)
 PY
+
+## Feature Canon
+자세한 기능·진행도: docs/FEATURE_MAP_v4_FinalFrontier.md

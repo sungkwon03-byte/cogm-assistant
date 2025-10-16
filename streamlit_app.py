@@ -1,3 +1,4 @@
+from app.core.feature_banner import *
 import streamlit as st,subprocess,os
 st.title("⚾ Co-GM Assistant – Ultra Lineup Plus Edition")
 pg=st.sidebar.selectbox("Select Module",["Game Predictor","Season Simulator","Lineup Optimizer","Power Ranking","Trade AI"])
