@@ -1,0 +1,9 @@
+{
+  "steps": [
+    "connected",
+    "views_created"
+  ],
+  "errors": [
+    "Traceback (most recent call last):\n  File \"<stdin>\", line 27, in <module>\nduckdb.duckdb.BinderException: Binder Error: Referenced column \"player_id\" not found in FROM clause!\nCandidate bindings: \"player_cards.player_uid\", \"player_cards.pa\", \"player_cards.team_id\", \"player_cards.pa_or_bf\", \"player_cards.age\"\nLINE 1: SELECT player_id, player_name FROM player_card...\n               ^\n"
+  ]
+}
