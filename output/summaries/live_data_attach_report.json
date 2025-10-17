@@ -5,7 +5,7 @@
     "view_statcast"
   ],
   "errors": [
-    "Binder Error: Column \"player_id\" referenced that exists in the SELECT clause - but this column cannot be referenced before it is defined"
+    "Binder Error: Values list \"c\" does not have a column named \"player_id\"\nLINE 12:                 ON  TRY_CAST(c.player_id AS BIGINT)=s.player_id\n                                      ^"
   ],
   "rows": {},
   "null_rates": {},
