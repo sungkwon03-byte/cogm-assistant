@@ -1,2 +1,3 @@
-rows=24783
-null% mlb_id=0.38, retro_id=1.11, bbref_id=4.10
+total_ids=2445
+mapped_ids=34
+miss_name_rate=0.986094
