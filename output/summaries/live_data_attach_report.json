@@ -2,10 +2,11 @@
   "steps": [
     "connected_duckdb",
     "view_player_cards",
-    "view_statcast"
+    "view_statcast",
+    "view_id_map_from_cards_only"
   ],
   "errors": [
-    "Binder Error: Values list \"c\" does not have a column named \"player_id\"\nLINE 12:                 ON  TRY_CAST(c.player_id AS BIGINT)=s.player_id\n                                      ^"
+    "Binder Error: Referenced column \"ev\" not found in FROM clause!\nCandidate bindings: \"s.events\", \"s.effective_speed\", \"s.year\", \"s.sv_id\", \"s.age_pit\"\nLINE 5:             CASE WHEN ev>=95 THEN 1 ELSE 0 END AS hard_hit,\n                              ^"
   ],
   "rows": {},
   "null_rates": {},

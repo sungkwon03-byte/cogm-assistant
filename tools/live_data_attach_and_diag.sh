@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# 목적: 실데이터 연결 + DuckDB 뷰 재구성 + 이름매핑 자동재생성(조인 기반) + 딥지표 생성 +
-#       품질진단(누락/NULL/커버리지) → 리포트 저장 → 자동 커밋/푸시
-# 특징: set +e (실패해도 터미널 안죽음), LFS 포인터 자동 감지, 조인 기반 id_map 생성으로 Binder 에러 제거
+# 목적: 실데이터 연결 + DuckDB 뷰 재구성 + (컬럼 자동 감지) 이름매핑 + 딥지표 + 품질리포트 + 자동 커밋/푸시
+# 특징:
+# - set +e: 실패해도 터미널 안죽음
+# - LFS 포인터 자동 감지
+# - player_cards 스키마를 DuckDB로 조회하여 "실제 존재하는 컬럼만"으로 조인/COALESCE 생성
 
 set +e
 ts(){ date -u +%FT%TZ; }; log(){ printf "[%s] %s\n" "$(ts)" "$*"; }
@@ -10,22 +12,19 @@ ROOT="$(pwd)"
 OUT="$ROOT/output"; DATA="$ROOT/data"; DUCK="$DATA/duckdb"; SUM="$OUT/summaries"; EXP="$OUT/exports"
 mkdir -p "$OUT" "$DATA" "$DUCK" "$SUM" "$EXP"
 
-chmod +x tools/*.sh 2>/dev/null || true
-sed -i 's/\r$//' tools/*.sh 2>/dev/null || true
-
 CARDS="$OUT/player_cards_all.parquet"
 STAT="$OUT/statcast_ultra_full_clean.parquet"
 IDMAP="$OUT/id_map.csv"
 DB="$DUCK/main.duckdb"
 REPORT_JSON="$SUM/live_data_attach_report.json"
 
-log "[LIVE+DIAG] start"
+log "[LIVE+DIAG v3] start"
 for f in "$CARDS" "$STAT" "$IDMAP"; do
   [ -s "$f" ] && log "[OK] found: $f" || log "[WARN] missing/empty: $f"
 done
 
 python3 - <<'PY'
-import os, json, duckdb, pathlib, sys
+import os, json, duckdb, pathlib
 
 root=os.getcwd(); out=f"{root}/output"; data=f"{root}/data"; duck=f"{data}/duckdb"; db=f"{duck}/main.duckdb"
 cards=f"{out}/player_cards_all.parquet"
@@ -51,13 +50,13 @@ try:
     con.execute("PRAGMA threads=4")
     res["steps"].append("connected_duckdb")
 
-    # 깨끗한 상태로 드롭 (뷰/테이블 구분 없이 시도)
+    # 깨끗하게 드롭
     for obj in ("player_cards","statcast","statcast_deep","id_map"):
         for kind in ("VIEW","TABLE"):
             try: con.execute(f"DROP {kind} IF EXISTS {obj}")
             except Exception as e: res["errors"].append(f"drop {kind} {obj}: {e}")
 
-    # 뷰 생성 (파라미터 바인딩 대신 리터럴 경로)
+    # 뷰 생성
     if ok(cards):
         con.execute(f"CREATE VIEW player_cards AS SELECT * FROM read_parquet('{esc(cards)}')")
         res["steps"].append("view_player_cards")
@@ -65,42 +64,90 @@ try:
         con.execute(f"CREATE VIEW statcast AS SELECT * FROM read_parquet('{esc(stat)}')")
         res["steps"].append("view_statcast")
 
-    # id_map 생성 로직 (조인 기반) — statcast.player_id ↔ player_cards 후보 키 매칭
-    if ok(stat) and ok(cards):
-        con.execute("""
+    # player_cards 실제 컬럼 목록 조회
+    cols_cards=set()
+    try:
+        df_cols=con.execute("PRAGMA table_info('player_cards')").fetchdf()
+        cols_cards=set(df_cols['name'].str.lower().tolist())
+    except Exception as e:
+        res["errors"].append(f"table_info player_cards: {e}")
+
+    # 후보 키/이름/팀/포지션 컬럼 중 실제 존재하는 것만 고른다
+    def pick_first(cands):
+        for c in cands:
+            if c.lower() in cols_cards:
+                return c
+        return None
+
+    id_candidates   = ["player_id","id","mlb_id","mlbam_id","fg_id","bbref_id","retro_id"]
+    name_candidates = ["player_name","name","full_name","Name"]
+    team_candidates = ["team","current_team","mlb_team","Team"]
+    pos_candidates  = ["pos","primary_pos","position","Position"]
+
+    # 존재 리스트
+    id_cols   = [c for c in id_candidates   if c.lower() in cols_cards]
+    name_cols = [c for c in name_candidates if c.lower() in cols_cards]
+    team_cols = [c for c in team_candidates if c.lower() in cols_cards]
+    pos_cols  = [c for c in pos_candidates  if c.lower() in cols_cards]
+
+    # COALESCE 구성 (없으면 NULL)
+    def coalesce_expr(cols):
+        if not cols: return "NULL"
+        return "COALESCE(" + ", ".join(cols) + ")"
+
+    name_expr = coalesce_expr(name_cols)
+    team_expr = coalesce_expr(team_cols)
+    pos_expr  = coalesce_expr(pos_cols)
+
+    # 조인식 구성: 존재하는 id 후보들만 OR로 묶어서 statcast.player_id와 매칭
+    join_ors=[]
+    for c in id_cols:
+        join_ors.append(f"TRY_CAST(c.\"{c}\" AS BIGINT)=s.player_id")
+    join_clause=" OR ".join(join_ors)
+
+    # id_map 생성 우선순위:
+    # 1) statcast & player_cards가 있으면 조인 기반 (존재 컬럼로만)
+    # 2) id_map.csv가 실제 파일이면 csv 사용
+    # 3) 마지막 fallback: cards만으로 distinct 추출
+    if ok(stat) and ok(cards) and join_clause:
+        sql=f"""
             CREATE VIEW id_map AS
             WITH c AS (SELECT * FROM player_cards),
             m AS (
               SELECT DISTINCT
                 s.player_id,
-                COALESCE(c.player_name, c.name, c.full_name) AS player_name,
-                COALESCE(c.team, c.current_team) AS team,
-                COALESCE(c.pos, c.primary_pos) AS pos
+                {name_expr} AS player_name,
+                {team_expr} AS team,
+                {pos_expr}  AS pos
               FROM statcast s
-              LEFT JOIN c
-                ON  TRY_CAST(c.player_id AS BIGINT)=s.player_id
-                 OR TRY_CAST(c.id        AS BIGINT)=s.player_id
-                 OR TRY_CAST(c.mlb_id    AS BIGINT)=s.player_id
-                 OR TRY_CAST(c.mlbam_id  AS BIGINT)=s.player_id
+              LEFT JOIN c ON {join_clause}
             )
             SELECT * FROM m
-        """)
+        """
+        con.execute(sql)
         res["steps"].append("view_id_map_join_based")
     elif ok(idmap_csv) and not is_lfs_pointer(idmap_csv):
         con.execute(f"CREATE VIEW id_map AS SELECT * FROM read_csv_auto('{esc(idmap_csv)}')")
         res["steps"].append("view_id_map_from_csv")
-    else:
-        # 최후 fallback: 카드만으로 유추(매칭 X, 정보만 노출)
-        con.execute("""
+    elif ok(cards):
+        # fallback: id 추정 (존재하는 id 후보 중 첫번째를 player_id로 노출)
+        pid = pick_first(id_candidates)
+        pid_expr = f"\"{pid}\"" if pid else "NULL"
+        sql=f"""
             CREATE VIEW id_map AS
             SELECT DISTINCT
-              COALESCE(player_id, id, mlb_id, mlbam_id) AS player_id,
-              COALESCE(player_name, name, full_name)     AS player_name,
-              COALESCE(team, current_team)               AS team,
-              COALESCE(pos, primary_pos)                 AS pos
+              TRY_CAST({pid_expr} AS BIGINT) AS player_id,
+              {name_expr} AS player_name,
+              {team_expr} AS team,
+              {pos_expr}  AS pos
             FROM player_cards
-        """)
+        """
+        con.execute(sql)
         res["steps"].append("view_id_map_from_cards_only")
+    else:
+        # 아무 것도 없으면 빈 뷰
+        con.execute("CREATE VIEW id_map AS SELECT CAST(NULL AS BIGINT) AS player_id, CAST(NULL AS VARCHAR) AS player_name, CAST(NULL AS VARCHAR) AS team, CAST(NULL AS VARCHAR) AS pos LIMIT 0")
+        res["steps"].append("view_id_map_empty")
 
     # 딥지표
     if ok(stat):
@@ -119,7 +166,7 @@ try:
         try: res["rows"][t]=con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
         except Exception as e: res["errors"].append(f"count {t}: {e}")
 
-    # NULL률(존재 컬럼만 시도)
+    # NULL률
     def null_rate(table, col):
         try:
             return con.execute(f"SELECT SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END)::DOUBLE/NULLIF(COUNT(*),0) FROM {table}").fetchone()[0]
@@ -147,12 +194,13 @@ try:
           WHERE s.player_id IS NOT NULL AND (m.player_name IS NULL OR m.player_name='')
           GROUP BY 1 ORDER BY n DESC LIMIT 10
         """).fetchdf()
+        pathlib.Path(expdir).mkdir(parents=True, exist_ok=True)
         unmapped.to_csv(f"{expdir}/unmapped_player_ids_top10.csv", index=False)
         res["unmapped_top"]=unmapped.to_dict("records")
     except Exception as e:
         res["errors"].append(f"unmapped_top: {e}")
 
-    # 샘플(매핑된/미매핑)
+    # 샘플(매핑/미매핑)
     try:
         samp_m=con.execute("""
           SELECT s.player_id, m.player_name, s.game_date, s.pitch_type, s.ev, s.la, s.pitch_velo, s.spin_rate, s.hard_hit, s.barrel_like
@@ -172,31 +220,16 @@ try:
     except Exception as e:
         res["errors"].append(f"sample_unmapped: {e}")
 
-    # 품질 요약
-    try:
-        qa=con.execute("""
-          SELECT
-            COUNT(*) AS n,
-            SUM(CASE WHEN ev>=95 THEN 1 ELSE 0 END) AS hard_hits,
-            SUM(CASE WHEN ev>=98 AND la BETWEEN 8 AND 32 THEN 1 ELSE 0 END) AS barrel_like,
-            AVG(ev) AS ev_avg, AVG(la) AS la_avg, AVG(spin_rate) AS spin_avg
-          FROM statcast
-        """).fetchdf()
-        qa.to_csv(f"{expdir}/statcast_quality_summary.csv", index=False)
-        res["steps"].append("export_quality_summary")
-    except Exception as e:
-        res["errors"].append(f"quality_summary: {e}")
-
 except Exception as e:
     res["errors"].append(str(e))
 
-os.makedirs(sumdir, exist_ok=True)
+pathlib.Path(sumdir).mkdir(parents=True, exist_ok=True)
 with open(report_path,"w",encoding="utf-8") as f:
     json.dump(res,f,ensure_ascii=False,indent=2)
 print(json.dumps(res,ensure_ascii=False))
 PY
 
-# 요약 출력 (jq 없으면 cat)
+# 요약 출력 (jq 있으면 보기 좋게)
 if command -v jq >/dev/null 2>&1 && [ -s "$REPORT_JSON" ]; then
   rows=$(jq -r '.rows|to_entries|map("\(.key)=\(.value)")|join(", ")' "$REPORT_JSON")
   miss=$(jq -r '.join_coverage.id_map_missing_name_rate' "$REPORT_JSON")
@@ -209,9 +242,9 @@ else
   echo "[WARN] report json missing: $REPORT_JSON"
 fi
 
-# 자동 커밋/푸시
+# 자동 커밋/푸시 (조용히)
 git add -A >/dev/null 2>&1
-git commit -m "live-data: attach + deep metrics + join-based id_map + diagnostics (report+exports)" >/dev/null 2>&1 || echo "[GIT] nothing to commit"
+git commit -m "live-data v3: dynamic-column join for id_map + deep metrics + diagnostics (report+exports)" >/dev/null 2>&1 || echo "[GIT] nothing to commit"
 git push >/dev/null 2>&1 && echo "[GIT] pushed" || echo "[GIT] push skipped"
 
 echo "[LIVE+DIAG] done"
