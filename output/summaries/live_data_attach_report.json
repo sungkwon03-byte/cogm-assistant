@@ -4,7 +4,9 @@
     "view_player_cards",
     "view_statcast_base",
     "view_statcast_with_player_id",
-    "view_id_map_from_cards_only",
+    "view_stat_names",
+    "view_cards_names",
+    "view_id_map_final",
     "view_statcast_deep"
   ],
   "errors": [],
@@ -12,14 +14,16 @@
     "player_cards": 1400,
     "statcast": 51706,
     "statcast_deep": 51706,
-    "id_map": 1
+    "id_map": 1461,
+    "stat_names": 51706,
+    "cards_names": 1400
   },
   "null_rates": {
-    "ev": 0.7861370053765521,
-    "la": 0.7857695431864774,
-    "pitch_velo": 0.3123428615634549,
-    "spin_rate": 0.32406297141530965,
-    "player_id": 0.0
+    "ev": null,
+    "la": null,
+    "pitch_velo": null,
+    "spin_rate": null,
+    "player_id": null
   },
   "join_coverage": {
     "id_map_missing_name_rate": 1.0
