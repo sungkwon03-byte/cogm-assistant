@@ -1,3 +1,2 @@
-version https://git-lfs.github.com/spec/v1
-oid sha256:2b2ff3a52fb9a2c3c0ebb7050b54eb4aad27cf7e46ef4f6ebb4d1909a2efef16
-size 997955
+version https://git-lfs.github.com/spec/v1,player_id,player_name,team,pos
+oid sha256:2b2ff3a52fb9a2c3c0ebb7050b54eb4aad27cf7e46ef4f6ebb4d1909a2efef16,,,,

@@ -1,0 +1,15 @@
+{
+  "steps": [
+    "connected_duckdb",
+    "view_player_cards",
+    "view_statcast"
+  ],
+  "errors": [
+    "Binder Error: Column \"player_id\" referenced that exists in the SELECT clause - but this column cannot be referenced before it is defined"
+  ],
+  "rows": {},
+  "null_rates": {},
+  "join_coverage": {},
+  "unmapped_top": [],
+  "samples": {}
+}

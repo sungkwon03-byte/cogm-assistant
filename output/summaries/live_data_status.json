@@ -1,0 +1,7 @@
+{
+  "errors": [
+    "Binder Error: Referenced column \"player_id\" not found in FROM clause!\nCandidate bindings: \"player_cards.player_uid\", \"player_cards.pa\", \"player_cards.team_id\", \"player_cards.pa_or_bf\", \"player_cards.age\"\nLINE 5:                 COALESCE(player_id, id)                             AS pid_cast,\n                COALESCE(player_name, name)                         AS pname,\n                COALESCE(team, current_team, team_name, team_abbrev) AS team,\n                COALESCE(pos, primary_pos, position, def_pos)       AS pos\n              FROM player_cards\n            )\n            SELECT pid_cast AS player_id, pname AS player_name, team, pos\n            FROM src\n            WHERE pid_cast IS NOT NULL\n        ...\n                                 ^"
+  ],
+  "rows": {},
+  "name_join_missing_rate": null
+}

@@ -1,0 +1,65 @@
+{
+  "rows": {
+    "player_cards": 1400,
+    "statcast": 51706,
+    "statcast_deep": 51706,
+    "id_map": 2
+  },
+  "sample": [
+    {
+      "player_id": 680757,
+      "game_date": "2023-04-01",
+      "ev": NaN,
+      "la": NaN,
+      "pitch_type": "4-Seam Fastball",
+      "pitch_velo": 95.3,
+      "spin_rate": 1911.0,
+      "hard_hit": 0,
+      "barrel_like": 0
+    },
+    {
+      "player_id": 680757,
+      "game_date": "2023-04-01",
+      "ev": NaN,
+      "la": 21.0,
+      "pitch_type": "4-Seam Fastball",
+      "pitch_velo": 96.5,
+      "spin_rate": 1983.0,
+      "hard_hit": 0,
+      "barrel_like": 0
+    },
+    {
+      "player_id": 680757,
+      "game_date": "2023-04-01",
+      "ev": NaN,
+      "la": NaN,
+      "pitch_type": "4-Seam Fastball",
+      "pitch_velo": 97.3,
+      "spin_rate": 2106.0,
+      "hard_hit": 0,
+      "barrel_like": 0
+    },
+    {
+      "player_id": 680757,
+      "game_date": "2023-04-01",
+      "ev": NaN,
+      "la": NaN,
+      "pitch_type": "4-Seam Fastball",
+      "pitch_velo": 96.4,
+      "spin_rate": 2079.0,
+      "hard_hit": 0,
+      "barrel_like": 0
+    },
+    {
+      "player_id": 660757,
+      "game_date": "2023-04-01",
+      "ev": NaN,
+      "la": NaN,
+      "pitch_type": "4-Seam Fastball",
+      "pitch_velo": 94.1,
+      "spin_rate": 1857.0,
+      "hard_hit": 0,
+      "barrel_like": 0
+    }
+  ]
+}
