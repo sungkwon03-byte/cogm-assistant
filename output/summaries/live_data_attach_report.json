@@ -2,15 +2,125 @@
   "steps": [
     "connected_duckdb",
     "view_player_cards",
-    "view_statcast",
-    "view_id_map_from_cards_only"
+    "view_statcast_base",
+    "view_statcast_with_player_id",
+    "view_id_map_from_cards_only",
+    "view_statcast_deep"
   ],
-  "errors": [
-    "Binder Error: Referenced column \"ev\" not found in FROM clause!\nCandidate bindings: \"s.events\", \"s.effective_speed\", \"s.year\", \"s.sv_id\", \"s.age_pit\"\nLINE 5:             CASE WHEN ev>=95 THEN 1 ELSE 0 END AS hard_hit,\n                              ^"
+  "errors": [],
+  "rows": {
+    "player_cards": 1400,
+    "statcast": 51706,
+    "statcast_deep": 51706,
+    "id_map": 1
+  },
+  "null_rates": {
+    "ev": 0.7861370053765521,
+    "la": 0.7857695431864774,
+    "pitch_velo": 0.3123428615634549,
+    "spin_rate": 0.32406297141530965,
+    "player_id": 0.0
+  },
+  "join_coverage": {
+    "id_map_missing_name_rate": 1.0
+  },
+  "unmapped_top": [
+    {
+      "player_id": 641857,
+      "n": 174
+    },
+    {
+      "player_id": 683011,
+      "n": 169
+    },
+    {
+      "player_id": 669016,
+      "n": 165
+    },
+    {
+      "player_id": 669742,
+      "n": 163
+    },
+    {
+      "player_id": 592206,
+      "n": 160
+    },
+    {
+      "player_id": 516416,
+      "n": 157
+    },
+    {
+      "player_id": 602074,
+      "n": 155
+    },
+    {
+      "player_id": 680757,
+      "n": 154
+    },
+    {
+      "player_id": 678246,
+      "n": 153
+    },
+    {
+      "player_id": 592192,
+      "n": 153
+    }
   ],
-  "rows": {},
-  "null_rates": {},
-  "join_coverage": {},
-  "unmapped_top": [],
-  "samples": {}
+  "samples": {
+    "mapped": [],
+    "unmapped": [
+      {
+        "player_id": 680757,
+        "game_date": "2023-04-01",
+        "pitch_type": "FF",
+        "ev": NaN,
+        "la": NaN,
+        "pitch_velo": 95.3,
+        "spin_rate": 1911.0
+      },
+      {
+        "player_id": 680757,
+        "game_date": "2023-04-01",
+        "pitch_type": "FF",
+        "ev": 78.2,
+        "la": 21.0,
+        "pitch_velo": 96.5,
+        "spin_rate": 1983.0
+      },
+      {
+        "player_id": 680757,
+        "game_date": "2023-04-01",
+        "pitch_type": "FF",
+        "ev": NaN,
+        "la": NaN,
+        "pitch_velo": 97.3,
+        "spin_rate": 2106.0
+      },
+      {
+        "player_id": 680757,
+        "game_date": "2023-04-01",
+        "pitch_type": "FF",
+        "ev": NaN,
+        "la": NaN,
+        "pitch_velo": 96.4,
+        "spin_rate": 2079.0
+      },
+      {
+        "player_id": 660757,
+        "game_date": "2023-04-01",
+        "pitch_type": "FF",
+        "ev": NaN,
+        "la": NaN,
+        "pitch_velo": 94.1,
+        "spin_rate": 1857.0
+      }
+    ]
+  },
+  "aliases": {
+    "ev": "COALESCE(\"launch_speed\")",
+    "la": "COALESCE(\"launch_angle\")",
+    "pitch_velo": "COALESCE(\"release_speed\", \"effective_speed\")",
+    "spin_rate": "COALESCE(\"release_spin_rate\", \"spin_rate_deprecated\")",
+    "pitch_type": "COALESCE(\"pitch_type\", \"pitch_name\")"
+  }
 }
