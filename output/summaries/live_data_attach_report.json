@@ -6,6 +6,7 @@
     "view_statcast_with_player_id",
     "view_stat_names",
     "view_cards_names",
+    "view_id_map_base",
     "view_id_map_final",
     "view_statcast_deep"
   ],
@@ -18,13 +19,7 @@
     "stat_names": 51706,
     "cards_names": 1400
   },
-  "null_rates": {
-    "ev": null,
-    "la": null,
-    "pitch_velo": null,
-    "spin_rate": null,
-    "player_id": null
-  },
+  "null_rates": {},
   "join_coverage": {
     "id_map_missing_name_rate": 1.0
   },
@@ -126,5 +121,6 @@
     "pitch_velo": "COALESCE(\"release_speed\", \"effective_speed\")",
     "spin_rate": "COALESCE(\"release_spin_rate\", \"spin_rate_deprecated\")",
     "pitch_type": "COALESCE(\"pitch_type\", \"pitch_name\")"
-  }
+  },
+  "notes": []
 }

@@ -1,0 +1,4 @@
+player_id,player_name
+641857,First Last
+683011,First Last
+# 위 포맷으로 필요한 player_id→이름을 채워서 id_map_external.csv 로 저장하면 자동 병합됨
